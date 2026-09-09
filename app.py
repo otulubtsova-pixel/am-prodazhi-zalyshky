@@ -11,7 +11,7 @@ share.streamlit.io, указав app.py как главный файл.
 """
 
 import io
-from datetime import datetime
+from pathlib import Path
 
 import streamlit as st
 
@@ -26,26 +26,26 @@ st.write(
     "та підсвіченою колонкою «НОВА АМ» по кожному магазину."
 )
 
+FILE_TYPES = ["xlsx", "xls"]
+
 col1, col2 = st.columns(2)
 with col1:
     src_file = st.file_uploader(
-        "Файл контрагента (.xlsx)",
-        type=["xlsx"],
+        "Файл контрагента (.xlsx або .xls)",
+        type=FILE_TYPES,
         help='Наприклад "АМ+продажі+залишки_Міленіум_контрагент.xlsx" — з листами "АМ" і "Продажі 2025".',
     )
 with col2:
     delivery_file = st.file_uploader(
-        "Графік поставок (.xls)",
-        type=["xls"],
-        help='Наприклад "Графік поставок 04,09,2026.xls" — старий формат Excel (.xls), листи Chicco/Kids2/Offspring/Kendamil та інші.',
+        "Графік поставок (.xls або .xlsx)",
+        type=FILE_TYPES,
+        help='Наприклад "Графік поставок 04,09,2026.xls" — листи Chicco/Kids2/Offspring/Kendamil та інші.',
     )
 
 if st.button("Сформувати звіт", type="primary", disabled=not (src_file and delivery_file)):
     try:
         with st.spinner("Обробляю файли..."):
-            src_bytes = io.BytesIO(src_file.getvalue())
-            delivery_bytes = delivery_file.getvalue()
-            out_wb, stats = build_report(src_bytes, delivery_bytes)
+            out_wb, stats = build_report(src_file, delivery_file)
 
             buf = io.BytesIO()
             out_wb.save(buf)
@@ -53,6 +53,8 @@ if st.button("Сформувати звіт", type="primary", disabled=not (src_
     except KeyError as e:
         st.error(f"У файлі контрагента не знайдено очікуваний лист: {e}. "
                  f"Перевірте, що є листи \"АМ\" і \"Продажі 2025\".")
+    except ValueError as e:
+        st.error(str(e))
     except Exception as e:
         st.error(f"Не вдалося сформувати звіт: {e}")
     else:
@@ -63,7 +65,7 @@ if st.button("Сформувати звіт", type="primary", disabled=not (src_
         c3.metric("Рядків товарів", stats["n_rows"])
         c4.metric("Кандидатів у новинки", stats["n_novelty"])
 
-        out_name = f"Звід_{datetime.now():%Y-%m-%d_%H%M}.xlsx"
+        out_name = f"Звід_{Path(src_file.name).stem}.xlsx"
         st.download_button(
             "Завантажити звіт (.xlsx)",
             data=buf,

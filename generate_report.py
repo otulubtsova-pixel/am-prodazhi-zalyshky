@@ -2,6 +2,10 @@
 Формирует сводный файл по товарам и магазинам на основании
 "АМ+продажі+залишки_Міленіум_контрагент.xlsx".
 
+Оба входных файла (файл контрагента и графік поставок) принимаются как
+в формате .xlsx, так и в старом .xls - формат определяется по содержимому
+файла (сигнатуре), а не по расширению в имени.
+
 Один товар + один магазин = одна строка.
 
 Логика:
@@ -49,6 +53,8 @@
   "В дорозі". Остальные поля пустые.
 """
 
+import io
+
 import openpyxl
 import xlrd
 from openpyxl.styles import PatternFill
@@ -58,6 +64,89 @@ NOVA_AM_FILL = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="
 SRC = "АМ+продажі+залишки_Міленіум_контрагент.xlsx"
 DELIVERY_SRC = "Графік поставок 04,09,2026.xls"
 OUT = "Звід_АМ_продажі_залишки_Міленіум.xlsx"
+
+XLS_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"  # OLE2/Compound File - старий .xls
+XLSX_MAGIC = b"PK"  # ZIP - сучасний .xlsx
+
+
+def detect_excel_format(data):
+    """Визначає реальний формат за вмістом файлу, а не за розширенням."""
+    if data[:2] == XLSX_MAGIC:
+        return "xlsx"
+    if data[:8] == XLS_MAGIC:
+        return "xls"
+    raise ValueError("Не вдалося розпізнати формат файлу - очікується .xlsx або .xls")
+
+
+def read_bytes(file):
+    """file - шлях на диску (str), файлоподібний об'єкт, або вже готові bytes."""
+    if isinstance(file, (bytes, bytearray)):
+        return bytes(file)
+    if hasattr(file, "read"):
+        data = file.read()
+        if hasattr(file, "seek"):
+            try:
+                file.seek(0)
+            except (OSError, ValueError):
+                pass
+        return data
+    with open(file, "rb") as f:
+        return f.read()
+
+
+class _Cell:
+    __slots__ = ("value",)
+
+    def __init__(self, value):
+        self.value = value
+
+
+class _XlsAsOpenpyxlSheet:
+    """Оборачивает лист xlrd (.xls, 0-индексация) под API листа openpyxl (1-индексация)."""
+
+    def __init__(self, xlrd_sheet):
+        self._sheet = xlrd_sheet
+        self.max_row = xlrd_sheet.nrows
+        self.max_column = xlrd_sheet.ncols
+
+    def cell(self, row, column):
+        r, c = row - 1, column - 1
+        if r < 0 or c < 0 or r >= self._sheet.nrows or c >= self._sheet.ncols:
+            return _Cell(None)
+        value = self._sheet.cell_value(r, c)
+        return _Cell(value if value != "" else None)
+
+
+class _XlsAsOpenpyxlWorkbook:
+    def __init__(self, xlrd_book):
+        self._book = xlrd_book
+
+    def __getitem__(self, name):
+        return _XlsAsOpenpyxlSheet(self._book.sheet_by_name(name))
+
+
+class _XlsxAsXlrdSheet:
+    """Оборачивает лист openpyxl (.xlsx, 1-індексація) під API листа xlrd (0-індексація)."""
+
+    def __init__(self, ws):
+        self._ws = ws
+        self.nrows = ws.max_row
+        self.ncols = ws.max_column
+
+    def cell_value(self, row, col):
+        value = self._ws.cell(row=row + 1, column=col + 1).value
+        return value if value is not None else ""
+
+
+class _XlsxAsXlrdBook:
+    def __init__(self, wb):
+        self._wb = wb
+
+    def sheet_names(self):
+        return self._wb.sheetnames
+
+    def sheet_by_name(self, name):
+        return _XlsxAsXlrdSheet(self._wb[name])
 
 DESC_COLS = [
     "Поставщик", "Код Группы", "Торговая Марка", "Но_",
@@ -206,10 +295,12 @@ def group_sum(period_values, months):
 
 
 def open_delivery_workbook(file):
-    """file - путь на диске (str) либо байты содержимого .xls файла."""
-    if isinstance(file, (bytes, bytearray)):
-        return xlrd.open_workbook(file_contents=bytes(file))
-    return xlrd.open_workbook(file)
+    """file - путь на диске, файлоподобный объект либо байты (.xls или .xlsx)."""
+    data = read_bytes(file)
+    fmt = detect_excel_format(data)
+    if fmt == "xls":
+        return xlrd.open_workbook(file_contents=data)
+    return _XlsxAsXlrdBook(openpyxl.load_workbook(io.BytesIO(data), data_only=True))
 
 
 def parse_delivery_schedule(wb):
@@ -291,19 +382,22 @@ def find_novelty_candidates(wb, existing_articles, contragent_brands):
 
 def build_report(src_file, delivery_file):
     """
-    src_file / delivery_file - путь на диске (str) либо файлоподобный
-    объект (для src_file - совместимый с openpyxl.load_workbook, например
-    BytesIO или Streamlit UploadedFile; для delivery_file - тоже, либо
-    сырые bytes).
+    src_file / delivery_file - путь на диске (str), файлоподобный объект
+    (BytesIO, Streamlit UploadedFile) либо сырые bytes. Формат каждого
+    файла (.xlsx или .xls) определяется по содержимому автоматически,
+    расширение в имени файла роли не играет.
     Возвращает (openpyxl.Workbook с готовым отчётом, dict со статистикой).
     """
-    wb = openpyxl.load_workbook(src_file, data_only=True)
+    src_bytes = read_bytes(src_file)
+    src_fmt = detect_excel_format(src_bytes)
+    if src_fmt == "xlsx":
+        wb = openpyxl.load_workbook(io.BytesIO(src_bytes), data_only=True)
+    else:
+        wb = _XlsAsOpenpyxlWorkbook(xlrd.open_workbook(file_contents=src_bytes))
 
     am_store_cols, am_desc, am_data = parse_am_sheet(wb["АМ"])
     pr_store_periods, pr_desc, pr_data = parse_sales_sheet(wb["Продажі 2025"])
 
-    if hasattr(delivery_file, "read"):
-        delivery_file = delivery_file.read()
     delivery_wb = open_delivery_workbook(delivery_file)
     delivery_data = parse_delivery_schedule(delivery_wb)
 
