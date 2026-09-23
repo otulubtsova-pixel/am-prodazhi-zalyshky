@@ -611,12 +611,19 @@ def lookup_category(art, name, abc_by_article, abc_by_name):
     return None
 
 
-def build_report(src_file, delivery_file, price_file=None, abc_files=None):
+def build_report(src_file, delivery_file, price_file=None, abc_files=None, network_sales_file=None):
     """
     src_file / delivery_file - путь на диске (str), файлоподобный объект
     (BytesIO, Streamlit UploadedFile) либо сырые bytes. Формат каждого
     файла (.xlsx или .xls) определяется по содержимому автоматически,
     расширение в имени файла роли не играет.
+    network_sales_file (необов'язковий) - файл "Мережі продажі" (звіт
+    1С "Аналіз продаж по сетям товарів на реалізації"). Дає АВС-аналіз
+    магазинів за категорією "Іграшка": новий рядок над назвами магазинів
+    (АВС-клас кожного) і один лист Total (повний список магазинів цього
+    контрагента з "Продажі", "Серед.продажі в міс." і АВС-класом,
+    відсортований за спаданням середніх продажів).
+    Без цього файлу нова строка і лист Total просто не додаються.
     Возвращает (openpyxl.Workbook с готовым отчётом, dict со статистикой).
     """
     src_bytes = read_bytes(src_file)
@@ -646,24 +653,39 @@ def build_report(src_file, delivery_file, price_file=None, abc_files=None):
 
     n_desc_cols = len(DESC_COLS) + len(PRODUCT_FIELDS)
 
-    # Header row 1: store name repeated across its block of columns
+    network_data = {}
+    if network_sales_file:
+        network_data = parse_network_sales_category(open_delivery_workbook(network_sales_file), "Іграшка")
+    network_stores = {k: v for k, v in network_data.items() if k in set(all_stores)}
+    abc_result = classify_store_abc(network_stores) if network_stores else {}
+    if network_stores:
+        total_ws = out_wb.create_sheet(title="Total")
+        _write_store_totals_sheet(total_ws, network_stores, abc_result)
+
+    # Header row 1: АВС-клас магазину (з "Мережі продажі"), над назвою магазину
     for i, store in enumerate(all_stores):
         start_col = n_desc_cols + 1 + i * len(STORE_FIELDS)
         for j in range(len(STORE_FIELDS)):
-            out_ws.cell(row=1, column=start_col + j, value=store)
+            out_ws.cell(row=1, column=start_col + j, value=abc_result.get(_normalize_store_key(store)))
 
-    # Header row 2: descriptive + product-level field names, then repeating store field names
+    # Header row 2: store name repeated across its block of columns
+    for i, store in enumerate(all_stores):
+        start_col = n_desc_cols + 1 + i * len(STORE_FIELDS)
+        for j in range(len(STORE_FIELDS)):
+            out_ws.cell(row=2, column=start_col + j, value=store)
+
+    # Header row 3: descriptive + product-level field names, then repeating store field names
     for i, name in enumerate(DESC_COLS + PRODUCT_FIELDS):
-        out_ws.cell(row=2, column=i + 1, value=name)
+        out_ws.cell(row=3, column=i + 1, value=name)
     for i, store in enumerate(all_stores):
         start_col = n_desc_cols + 1 + i * len(STORE_FIELDS)
         for j, field in enumerate(STORE_FIELDS):
-            out_ws.cell(row=2, column=start_col + j, value=field)
+            out_ws.cell(row=3, column=start_col + j, value=field)
 
-    out_ws.freeze_panes = out_ws.cell(row=3, column=n_desc_cols + 1)
+    out_ws.freeze_panes = out_ws.cell(row=4, column=n_desc_cols + 1)
 
     n_rows = 0
-    for r, key in enumerate(all_keys, start=3):
+    for r, key in enumerate(all_keys, start=4):
         desc = am_desc.get(key) or pr_desc.get(key) or {}
         for i, name in enumerate(DESC_COLS):
             out_ws.cell(row=r, column=i + 1, value=key if name == "Но_" else desc.get(name))
@@ -706,7 +728,7 @@ def build_report(src_file, delivery_file, price_file=None, abc_files=None):
     name_col = DESC_COLS.index("Наименование товара") + 1
     art_col = DESC_COLS.index("Артикул") + 1
     vdorozi_col = len(DESC_COLS) + 1
-    r = 3 + n_rows
+    r = 4 + n_rows
     for name, art, qty in novelty_candidates:
         out_ws.cell(row=r, column=name_col, value=name)
         out_ws.cell(row=r, column=art_col, value=art)
@@ -719,8 +741,8 @@ def build_report(src_file, delivery_file, price_file=None, abc_files=None):
     for i in range(len(all_stores)):
         start_col = n_desc_cols + 1 + i * len(STORE_FIELDS)
         nova_am_col = start_col + nova_am_field_index
-        out_ws.cell(row=2, column=nova_am_col).fill = NOVA_AM_FILL
-        for row in range(3, last_row + 1):
+        out_ws.cell(row=3, column=nova_am_col).fill = NOVA_AM_FILL
+        for row in range(4, last_row + 1):
             out_ws.cell(row=row, column=nova_am_col).fill = NOVA_AM_FILL
 
     stats = {
@@ -728,6 +750,7 @@ def build_report(src_file, delivery_file, price_file=None, abc_files=None):
         "n_stores": len(all_stores),
         "n_rows": n_rows,
         "n_novelty": len(novelty_candidates),
+        "n_network_stores": len(network_stores),
     }
     return out_wb, stats
 
@@ -872,6 +895,7 @@ def build_epicentr_report(
 def build_epicentr_combined_report(
     mt_season, mt_offseason, bsh_season, bsh_offseason,
     reference_file=None, price_file=None, delivery_file=None, abc_files=None,
+    network_sales_file=None,
 ):
     """
     Один вихідний файл з двома листами - "МТ" (Мілленіум Трейд) і "БШ"
@@ -883,7 +907,12 @@ def build_epicentr_combined_report(
     "Артикул"/"Бренд"/"Статус артикула"/"Склад"; delivery_file - графік
     поставок для "В дорозі" (за щойно підтягнутим "Артикул"); abc_files -
     список файлів АВС-аналізу продажів для "Категорія" (спільний для обох
-    листів - джойн за "Артикул", резервно за точною "Назва").
+    листів - джойн за "Артикул", резервно за точною "Назва"); network_sales_file -
+    файл "Мережі продажі" для АВС-аналізу магазинів за категорією "Іграшка":
+    новий рядок над кодами магазинів на листах "МТ"/"БШ", і два листи
+    Total_МТ/Total_БШ з ОДНАКОВИМ вмістом (повний список магазинів Епіцентру,
+    знайдених і в "Мережі продажі", і хоча б в одному з чотирьох файлів
+    продажу, з "Продажі", "Серед.продажі в міс." і АВС-класом).
     Повертає (openpyxl.Workbook, {"МТ": stats, "БШ": stats}).
     """
     ref_wb = open_delivery_workbook(reference_file) if reference_file else None
@@ -891,8 +920,20 @@ def build_epicentr_combined_report(
     delivery_wb = open_delivery_workbook(delivery_file) if delivery_file else None
     abc_by_article, abc_by_name = parse_abc_files(abc_files) if abc_files else ({}, {})
 
+    epicentr_stores = set()
+    for f in (mt_season, mt_offseason, bsh_season, bsh_offseason):
+        _, _, stores, _ = parse_epicentr_sales(open_delivery_workbook(f))
+        epicentr_stores |= stores
+
+    network_data = {}
+    if network_sales_file:
+        network_data = parse_network_sales_category(open_delivery_workbook(network_sales_file), "Іграшка")
+    network_stores = {k: v for k, v in network_data.items() if k in epicentr_stores}
+
     out_wb = openpyxl.Workbook()
     out_wb.remove(out_wb.active)
+
+    network_abc = classify_store_abc(network_stores) if network_stores else {}
 
     all_stats = {}
     for label, season_f, offseason_f in [
@@ -901,8 +942,14 @@ def build_epicentr_combined_report(
     ]:
         out_ws = out_wb.create_sheet(title=label)
         all_stats[label] = _write_epicentr_sheet(
-            out_ws, season_f, offseason_f, ref_wb, price_wb, delivery_wb, abc_by_article, abc_by_name
+            out_ws, season_f, offseason_f, ref_wb, price_wb, delivery_wb, abc_by_article, abc_by_name,
+            network_abc,
         )
+
+    if network_stores:
+        for sheet_name in ("Total_МТ", "Total_БШ"):
+            out_ws = out_wb.create_sheet(title=sheet_name)
+            _write_store_totals_sheet(out_ws, network_stores, network_abc)
 
     return out_wb, all_stats
 
@@ -1025,11 +1072,158 @@ def find_best_reference_sheet(ref_wb, articles_needed):
     return best_am_map, best_sheet, best_overlap
 
 
+# --- Мережі продажі (АВС-аналіз магазинів) ---
+#
+# Файл - звіт 1С "Аналіз продаж по сетям товарів на реалізації": рядки
+# згруповані по категорії / магазину / адресі, колонки - по місяцях
+# (останній блок - "Итого"). Формат НЕ фіксований (може зміщуватись між
+# вивантаженнями), тому все шукається за назвами заголовків, а не за
+# номерами рядків/колонок:
+#   - рядок заголовків - той, де в колонці A є "Магазин сети";
+#   - у цьому рядку шукаються колонка "Адреса" і всі колонки "Сумма
+#     продано" (по одній на місяць плюс одна підсумкова - визначається
+#     за міткою в рядку над заголовками: "Итого" чи дата місяця);
+#   - потрібна категорія шукається як об'єднана комірка в колонці A
+#     (ширша за 2 колонки) з точним значенням її назви, десь нижче
+#     заголовків; кінець блоку категорії - наступна така сама об'єднана
+#     комірка (інша категорія або підсумковий "Итого" по всьому файлу);
+#   - рядок одразу під заголовком категорії, якщо він без назви магазину,
+#     пропускається як порожній рядок (загальне правило для будь-якого
+#     рядка без назви) - на практиці там іноді лишаються "нічийні" суми
+#     через те, що 1С під час вивантаження не розпізнала адресу окремого
+#     магазину і приплюсувала їх сюди; якщо ж назва там колись таки буде -
+#     рядок обробиться як звичайний магазин, а не пропуститься наосліп.
+NETWORK_STORE_HEADER = "магазин сети"
+NETWORK_ADDRESS_HEADER = "адреса"
+NETWORK_SUM_HEADER = "сумма продано"
+NETWORK_TOTAL_LABEL = "итого"
+
+
+def _normalize_store_key(value):
+    """Ключ магазину для звірки з іншими файлами: числа (код магазину на
+    кшталт 1, 2, 3) доповнюються нулем зліва до 2 знаків, як "01", "02" -
+    саме так вони записані в файлах продажу Епіцентру."""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if isinstance(value, int):
+        return f"{value:02d}"
+    return str(value).strip()
+
+
+def parse_network_sales_category(wb, category_name):
+    """
+    Розбирає файл "Мережі продажі" і повертає дані тільки по одній
+    категорії (category_name, наприклад "Іграшка"):
+      {ключ_магазину: {"name": назва як у файлі, "address": ...,
+                        "total": "Сумма продано" з блоку "Итого",
+                        "avg_month": total / кількість місяців, де
+                        "Сумма продано" не порожнє (None, якщо таких
+                        місяців нема)}}
+    Порожній словник, якщо потрібна категорія або потрібні заголовки не
+    знайдені.
+    """
+    ws = wb.sheet_by_index(0)
+    merged_cells = ws.merged_cells
+
+    header_row = None
+    for r in range(ws.nrows):
+        if _norm_header(ws.cell_value(r, 0)) == NETWORK_STORE_HEADER:
+            header_row = r
+            break
+    if header_row is None:
+        return {}
+
+    address_col = None
+    sum_cols = []  # (col, is_total)
+    for c in range(ws.ncols):
+        h = _norm_header(ws.cell_value(header_row, c))
+        if h == NETWORK_ADDRESS_HEADER:
+            address_col = c
+        elif h == NETWORK_SUM_HEADER:
+            anchor_r, anchor_c = _resolve_merge(merged_cells, header_row - 1, c)
+            month_label = ws.cell_value(anchor_r, anchor_c)
+            sum_cols.append((c, _norm_header(month_label) == NETWORK_TOTAL_LABEL))
+
+    total_col = next((c for c, is_total in sum_cols if is_total), None)
+    monthly_cols = [c for c, is_total in sum_cols if not is_total]
+    if total_col is None:
+        return {}
+
+    category_row = None
+    for r1, r2, c1, c2 in merged_cells:
+        if c1 == 0 and (c2 - c1) > 2 and r1 > header_row:
+            v = ws.cell_value(r1, 0)
+            if isinstance(v, str) and v.strip() == category_name:
+                category_row = r1
+                break
+    if category_row is None:
+        return {}
+
+    end_row = ws.nrows
+    for r1, r2, c1, c2 in merged_cells:
+        if c1 == 0 and (c2 - c1) > 2 and category_row < r1 < end_row:
+            end_row = r1
+
+    result = {}
+    for r in range(category_row + 1, end_row):  # +1: пропускаємо сам рядок заголовка категорії
+        name = ws.cell_value(r, 0)
+        if name in ("", None):
+            continue  # порожня назва - або "нічийний" рядок з артефактними сумами, або зайвий пробіл
+        address = ws.cell_value(r, address_col) if address_col is not None else None
+        total = ws.cell_value(r, total_col)
+        total = total if isinstance(total, (int, float)) else 0
+        active_months = sum(1 for c in monthly_cols if isinstance(ws.cell_value(r, c), (int, float)))
+        store_key = _normalize_store_key(name)
+        result[store_key] = {
+            "name": store_key if isinstance(name, (int, float)) else name.strip(),
+            "address": address if address not in ("", None) else None,
+            "total": total,
+            "avg_month": (total / active_months) if active_months else None,
+        }
+    return result
+
+
+def classify_store_abc(store_data):
+    """Класичний АВС-аналіз за "Серед.продажі в міс.": сортування за
+    спаданням, потім кумулятивний поріг 70% / 20% / 10%. Магазини без
+    жодного місяця продажів (avg_month=None) трактуються як 0 і йдуть в
+    кінець. Повертає {ключ_магазину: "A"|"B"|"C"}."""
+    items = sorted(store_data.items(), key=lambda kv: kv[1]["avg_month"] or 0, reverse=True)
+    total = sum(v["avg_month"] or 0 for _, v in items)
+    result, cum = {}, 0
+    for key, info in items:
+        cum += info["avg_month"] or 0
+        share = (cum / total) if total else 1
+        result[key] = "A" if share <= 0.7 else ("B" if share <= 0.9 else "C")
+    return result
+
+
+NETWORK_TOTALS_HEADERS = ["Магазин", "Адреса", "Продажі", "Серед.продажі в міс.", "АВС-клас"]
+
+
+def _write_store_totals_sheet(out_ws, store_data, abc_result):
+    """Пише лист Total (Антошка) / Total_МТ, Total_БШ (Епіцентр): магазини,
+    відсортовані за спаданням "Серед.продажі в міс.", з їх АВС-класом."""
+    for i, h in enumerate(NETWORK_TOTALS_HEADERS, start=1):
+        out_ws.cell(row=1, column=i, value=h)
+    ordered = sorted(store_data.items(), key=lambda kv: kv[1]["avg_month"] or 0, reverse=True)
+    for r, (key, info) in enumerate(ordered, start=2):
+        out_ws.cell(row=r, column=1, value=info["name"])
+        out_ws.cell(row=r, column=2, value=info["address"])
+        out_ws.cell(row=r, column=3, value=info["total"])
+        out_ws.cell(row=r, column=4, value=info["avg_month"])
+        out_ws.cell(row=r, column=5, value=abc_result.get(key))
+
+
 def _write_epicentr_sheet(
     out_ws, season_file, offseason_file,
     ref_wb=None, price_wb=None, delivery_wb=None, abc_by_article=None, abc_by_name=None,
+    network_abc=None,
 ):
-    """Пише один лист зводу Епіцентру в out_ws (уже створений). Повертає stats."""
+    """Пише один лист зводу Епіцентру в out_ws (уже створений). network_abc
+    (необов'язковий) - {код_магазину: АВС-клас} з "Мережі продажі", для
+    нового рядка над кодами магазинів. Повертає stats."""
+    network_abc = network_abc or {}
     season_wb = open_delivery_workbook(season_file)
     offseason_wb = open_delivery_workbook(offseason_file)
 
@@ -1064,26 +1258,32 @@ def _write_epicentr_sheet(
 
     n_desc_cols = len(EPICENTR_DESC_COLS)
 
+    # Рядок 1: АВС-клас магазину (з "Мережі продажі"), над кодом магазину
     for i, store in enumerate(all_stores):
         start_col = n_desc_cols + 1 + i * len(EPICENTR_STORE_FIELDS)
         for j in range(len(EPICENTR_STORE_FIELDS)):
-            out_ws.cell(row=1, column=start_col + j, value=store)
+            out_ws.cell(row=1, column=start_col + j, value=network_abc.get(_normalize_store_key(store)))
+
+    for i, store in enumerate(all_stores):
+        start_col = n_desc_cols + 1 + i * len(EPICENTR_STORE_FIELDS)
+        for j in range(len(EPICENTR_STORE_FIELDS)):
+            out_ws.cell(row=2, column=start_col + j, value=store)
 
     for i, name in enumerate(EPICENTR_DESC_COLS):
-        out_ws.cell(row=2, column=i + 1, value=name)
+        out_ws.cell(row=3, column=i + 1, value=name)
     for i, store in enumerate(all_stores):
         start_col = n_desc_cols + 1 + i * len(EPICENTR_STORE_FIELDS)
         for j, field in enumerate(EPICENTR_STORE_FIELDS):
-            out_ws.cell(row=2, column=start_col + j, value=field)
+            out_ws.cell(row=3, column=start_col + j, value=field)
 
-    out_ws.freeze_panes = out_ws.cell(row=3, column=n_desc_cols + 1)
+    out_ws.freeze_panes = out_ws.cell(row=4, column=n_desc_cols + 1)
 
     n_rows = 0
     price_matches = 0
     delivery_matches = 0
     existing_articles = set()
     contragent_brands = set()
-    for r, art in enumerate(all_articles, start=3):
+    for r, art in enumerate(all_articles, start=4):
         p_art, p_brand, p_status, p_sklad = price_map.get(art, (None, None, None, None))
         vdorozi = delivery_data.get(p_art) if p_art else None
         if p_art is not None:
@@ -1133,7 +1333,7 @@ def _write_epicentr_sheet(
     name_col = EPICENTR_DESC_COLS.index("Назва") + 1
     art_col = EPICENTR_DESC_COLS.index("Артикул") + 1
     vdorozi_col = EPICENTR_DESC_COLS.index("В дорозі") + 1
-    r = 3 + n_rows
+    r = 4 + n_rows
     for name, art, qty in novelty_candidates:
         out_ws.cell(row=r, column=name_col, value=name)
         out_ws.cell(row=r, column=art_col, value=art)
@@ -1145,8 +1345,8 @@ def _write_epicentr_sheet(
     for i in range(len(all_stores)):
         start_col = n_desc_cols + 1 + i * len(EPICENTR_STORE_FIELDS)
         col = start_col + nova_am_idx
-        out_ws.cell(row=2, column=col).fill = NOVA_AM_FILL
-        for row in range(3, last_row + 1):
+        out_ws.cell(row=3, column=col).fill = NOVA_AM_FILL
+        for row in range(4, last_row + 1):
             out_ws.cell(row=row, column=col).fill = NOVA_AM_FILL
 
     return {
