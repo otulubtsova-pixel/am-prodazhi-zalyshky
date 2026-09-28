@@ -54,6 +54,7 @@
 """
 
 import io
+import math
 import re
 import zipfile
 from datetime import date
@@ -63,6 +64,8 @@ import xlrd
 from openpyxl.styles import PatternFill
 
 NOVA_AM_FILL = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+NOVA_AM_PEACH_FILL = PatternFill(start_color="FFDAB9", end_color="FFDAB9", fill_type="solid")
+NOVA_AM_YELLOW_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 
 SRC = "АМ+продажі+залишки_Міленіум_контрагент.xlsx"
 DELIVERY_SRC = "Графік поставок 04,09,2026.xls"
@@ -529,15 +532,20 @@ def parse_price_list(wb, key_header=PRICE_KEY_HEADER):
 ABC_KEY_HEADER = "артикул"
 ABC_CLASS_HEADER = "авс-клас"
 ABC_NAME_HEADER = "групування"
+ABC_QTY_HEADER = "продажі, шт"
 
 
 def parse_abc_analysis(wb):
     """
-    Розбирає один файл АВС-аналізу продажів. Повертає (by_article, by_name):
+    Розбирає один файл АВС-аналізу продажів. Повертає
+    (by_article, by_name, qty_by_article, qty_by_name):
       by_article - {артикул: АВС-клас}
       by_name    - {точна назва товару: АВС-клас} - для резервного джойну,
                    якщо артикул не співпаде (без жодних відхилень - точний
                    рядок)
+      qty_by_article / qty_by_name - те саме, але значення "Продажі, шт"
+                   (для сортування товарів усередині класу за кількістю -
+                   автозаповнення "НОВА АМ").
     Порожні словники, якщо на листі немає заголовка "Артикул".
     """
     ws = wb.sheet_by_index(0)
@@ -551,9 +559,9 @@ def parse_abc_analysis(wb):
         if header_row is not None:
             break
     if header_row is None:
-        return {}, {}
+        return {}, {}, {}, {}
 
-    key_col = class_col = name_col = None
+    key_col = class_col = name_col = qty_col = None
     for c in range(ws.ncols):
         h = _norm_header(ws.cell_value(header_row, c))
         if h == ABC_KEY_HEADER and key_col is None:
@@ -562,12 +570,16 @@ def parse_abc_analysis(wb):
             class_col = c
         elif h == ABC_NAME_HEADER and name_col is None:
             name_col = c
+        elif h == ABC_QTY_HEADER and qty_col is None:
+            qty_col = c
 
     if key_col is None or class_col is None:
-        return {}, {}
+        return {}, {}, {}, {}
 
     by_article = {}
     by_name = {}
+    qty_by_article = {}
+    qty_by_name = {}
     for r in range(header_row + 1, ws.nrows):
         art = ws.cell_value(r, key_col)
         if art in ("", None):
@@ -575,29 +587,38 @@ def parse_abc_analysis(wb):
         cls = ws.cell_value(r, class_col)
         if cls in ("", None):
             continue
-        by_article[norm(art)] = str(cls).strip()
-        if name_col is not None:
-            name = ws.cell_value(r, name_col)
-            if name not in ("", None):
-                by_name[str(name).strip()] = str(cls).strip()
+        art_norm = norm(art)
+        by_article[art_norm] = str(cls).strip()
+        name = ws.cell_value(r, name_col) if name_col is not None else None
+        name = str(name).strip() if name not in ("", None) else None
+        if name is not None:
+            by_name[name] = str(cls).strip()
+        qty = ws.cell_value(r, qty_col) if qty_col is not None else None
+        if isinstance(qty, (int, float)):
+            qty_by_article[art_norm] = qty
+            if name is not None:
+                qty_by_name[name] = qty
 
-    return by_article, by_name
+    return by_article, by_name, qty_by_article, qty_by_name
 
 
 def parse_abc_files(files):
     """
     files - список файлів (шлях/файлоподібний об'єкт/bytes), кожен - один
-    файл АВС-аналізу. Об'єднує результати всіх файлів в один (by_article,
-    by_name); при дублікатах пізніший файл у списку переважає.
+    файл АВС-аналізу. Об'єднує результати всіх файлів в один
+    (by_article, by_name, qty_by_article, qty_by_name); при дублікатах
+    пізніший файл у списку переважає.
     """
-    by_article = {}
-    by_name = {}
+    by_article, by_name = {}, {}
+    qty_by_article, qty_by_name = {}, {}
     for f in files:
         wb = open_delivery_workbook(f)
-        a, n = parse_abc_analysis(wb)
+        a, n, qa, qn = parse_abc_analysis(wb)
         by_article.update(a)
         by_name.update(n)
-    return by_article, by_name
+        qty_by_article.update(qa)
+        qty_by_name.update(qn)
+    return by_article, by_name, qty_by_article, qty_by_name
 
 
 def lookup_category(art, name, abc_by_article, abc_by_name):
@@ -608,6 +629,98 @@ def lookup_category(art, name, abc_by_article, abc_by_name):
             return cat
     if name is not None:
         return abc_by_name.get(str(name).strip())
+    return None
+
+
+def lookup_abc_qty(art, name, qty_by_article, qty_by_name):
+    """"Продажі, шт" за тим самим товаром, за тією ж логікою (артикул,
+    резервно - точна назва), що і lookup_category."""
+    if art is not None:
+        qty = qty_by_article.get(art)
+        if qty is not None:
+            return qty
+    if name is not None:
+        return qty_by_name.get(str(name).strip())
+    return None
+
+
+def _class_letter(value):
+    """Витягує літеру класу (A/B/C) зі значення "Категорія" на кшталт
+    "A - класс" чи "B - клас". None, якщо не розпізнано."""
+    if not isinstance(value, str):
+        return None
+    v = value.strip().upper()
+    return v[0] if v[:1] in ("A", "B", "C") else None
+
+
+def _quantity_cutoff(quantities, fraction):
+    """Поріг кількості для "верхні `fraction`*100% позицій класу за
+    спаданням кількості": товар входить у цю частку, якщо його власна
+    кількість >= порогу. None, якщо quantities порожній."""
+    if not quantities:
+        return None
+    sorted_desc = sorted(quantities, reverse=True)
+    cutoff_idx = min(len(sorted_desc), max(1, math.ceil(len(sorted_desc) * fraction))) - 1
+    return sorted_desc[cutoff_idx]
+
+
+def class_quantity_cutoff(abc_by_article, qty_by_article, target_class, fraction):
+    """Рахує поріг _quantity_cutoff серед усіх товарів з класом
+    target_class (за даними усіх завантажених файлів АВС-аналізу разом)."""
+    quantities = [
+        qty_by_article[art] for art, cls in abc_by_article.items()
+        if _class_letter(cls) == target_class and art in qty_by_article
+    ]
+    return _quantity_cutoff(quantities, fraction)
+
+
+def _has_sales(*period_values):
+    return any(isinstance(v, (int, float)) and v > 0 for v in period_values)
+
+
+def _has_stock(value):
+    return isinstance(value, (int, float)) and value > 0
+
+
+def antoshka_assortment_match(store_class, product_class, product_qty, c_cutoff):
+    """Чи має товар бути представлений у магазині цього класу (Антошка):
+    A - усі класи A/B/C; B - класи A/B; C - класи A/B, і з класу C -
+    тільки верхні 75% за кількістю (c_cutoff - поріг з class_quantity_cutoff).
+    None, якщо клас магазину чи товару невідомий (немає з чим звіряти)."""
+    if store_class is None or product_class is None:
+        return None
+    if store_class == "A":
+        return product_class in ("A", "B", "C")
+    if store_class == "B":
+        return product_class in ("A", "B")
+    if store_class == "C":
+        if product_class in ("A", "B"):
+            return True
+        if product_class == "C":
+            return c_cutoff is not None and product_qty is not None and product_qty >= c_cutoff
+        return False
+    return None
+
+
+def epicentr_assortment_match(store_class, product_class, product_qty, b_cutoff):
+    """Те саме для Епіцентру: A - категорії A/B; B - категорія A, і з
+    категорії B - тільки верхні 50% за кількістю (b_cutoff); C - тільки
+    категорія A. Категорія C товару в асортимент Епіцентру не входить
+    ні в одному класі магазину."""
+    if store_class is None or product_class is None:
+        return None
+    if product_class == "C":
+        return False
+    if store_class == "A":
+        return product_class in ("A", "B")
+    if store_class == "B":
+        if product_class == "A":
+            return True
+        if product_class == "B":
+            return b_cutoff is not None and product_qty is not None and product_qty >= b_cutoff
+        return False
+    if store_class == "C":
+        return product_class == "A"
     return None
 
 
@@ -640,7 +753,10 @@ def build_report(src_file, delivery_file, price_file=None, abc_files=None, netwo
     delivery_data = parse_delivery_schedule(delivery_wb)
 
     price_data = parse_price_list(open_delivery_workbook(price_file)) if price_file else {}
-    abc_by_article, abc_by_name = parse_abc_files(abc_files) if abc_files else ({}, {})
+    abc_by_article, abc_by_name, qty_by_article, qty_by_name = (
+        parse_abc_files(abc_files) if abc_files else ({}, {}, {}, {})
+    )
+    c_cutoff = class_quantity_cutoff(abc_by_article, qty_by_article, "C", 0.75)
 
     all_stores = sorted(set(am_store_cols) | set(pr_store_periods))
     all_keys = sorted(set(am_desc) | set(pr_desc))
@@ -699,6 +815,10 @@ def build_report(src_file, delivery_file, price_file=None, abc_files=None, netwo
         out_ws.cell(row=r, column=len(DESC_COLS) + 3, value=price_sklad)
         out_ws.cell(row=r, column=len(DESC_COLS) + 4, value=category)
 
+        status_is_8 = price_status == 8
+        product_class = _class_letter(category)
+        product_qty = lookup_abc_qty(artikul, desc.get("Наименование товара"), qty_by_article, qty_by_name)
+
         for i, store in enumerate(all_stores):
             pr_vals = pr_data.get((key, store))
             am_val, zal_val = am_data.get((key, store), (None, None))
@@ -711,7 +831,22 @@ def build_report(src_file, delivery_file, price_file=None, abc_files=None, netwo
             out_ws.cell(row=r, column=start_col + 1, value=g2)
             out_ws.cell(row=r, column=start_col + 2, value=am_val)
             out_ws.cell(row=r, column=start_col + 3, value=zal_val)
-            out_ws.cell(row=r, column=start_col + 4, value=None)
+
+            nova_am_cell = out_ws.cell(row=r, column=start_col + 4)
+            if status_is_8:
+                nova_am_cell.value = 0
+            elif not _has_sales(g1, g2):
+                if _has_stock(zal_val):
+                    nova_am_cell.value = 0
+                else:
+                    nova_am_cell.fill = NOVA_AM_PEACH_FILL
+            else:
+                store_class = abc_result.get(_normalize_store_key(store))
+                match = antoshka_assortment_match(store_class, product_class, product_qty, c_cutoff)
+                if match is True:
+                    nova_am_cell.value = 1
+                else:
+                    nova_am_cell.fill = NOVA_AM_YELLOW_FILL
         n_rows += 1
 
     # Кандидаты в новинки - отдельными строками внизу: название, артикул
@@ -728,22 +863,28 @@ def build_report(src_file, delivery_file, price_file=None, abc_files=None, netwo
     name_col = DESC_COLS.index("Наименование товара") + 1
     art_col = DESC_COLS.index("Артикул") + 1
     vdorozi_col = len(DESC_COLS) + 1
+    status_col = len(DESC_COLS) + 2
     r = 4 + n_rows
     for name, art, qty in novelty_candidates:
         out_ws.cell(row=r, column=name_col, value=name)
         out_ws.cell(row=r, column=art_col, value=art)
         out_ws.cell(row=r, column=vdorozi_col, value=qty)
+        out_ws.cell(row=r, column=status_col, value="NEW")
+        for i in range(len(all_stores)):
+            start_col = n_desc_cols + 1 + i * len(STORE_FIELDS)
+            out_ws.cell(row=r, column=start_col + 4, value=1)
         r += 1
     last_row = r - 1
 
-    # "НОВА АМ" - светло-зелёная заливка (заголовок + все строки данных)
+    # Заголовок "НОВА АМ" - світло-зелена заливка як орієнтир по колонці.
+    # Заливка самих даних - за результатом розрахунку вище (NOVA_AM_PEACH_FILL
+    # / NOVA_AM_YELLOW_FILL для незаповнених клітинок, без заливки - для
+    # клітинок з уже проставленим 0/1).
     nova_am_field_index = STORE_FIELDS.index("НОВА АМ")
     for i in range(len(all_stores)):
         start_col = n_desc_cols + 1 + i * len(STORE_FIELDS)
         nova_am_col = start_col + nova_am_field_index
         out_ws.cell(row=3, column=nova_am_col).fill = NOVA_AM_FILL
-        for row in range(4, last_row + 1):
-            out_ws.cell(row=row, column=nova_am_col).fill = NOVA_AM_FILL
 
     stats = {
         "n_products": len(all_keys),
@@ -885,9 +1026,13 @@ def build_epicentr_report(
     ref_wb = open_delivery_workbook(reference_file) if reference_file else None
     price_wb = open_delivery_workbook(price_file) if price_file else None
     delivery_wb = open_delivery_workbook(delivery_file) if delivery_file else None
-    abc_by_article, abc_by_name = parse_abc_files(abc_files) if abc_files else ({}, {})
+    abc_by_article, abc_by_name, qty_by_article, qty_by_name = (
+        parse_abc_files(abc_files) if abc_files else ({}, {}, {}, {})
+    )
+    b_cutoff = class_quantity_cutoff(abc_by_article, qty_by_article, "B", 0.5)
     stats = _write_epicentr_sheet(
-        out_ws, season_file, offseason_file, ref_wb, price_wb, delivery_wb, abc_by_article, abc_by_name
+        out_ws, season_file, offseason_file, ref_wb, price_wb, delivery_wb, abc_by_article, abc_by_name,
+        qty_by_article=qty_by_article, qty_by_name=qty_by_name, b_cutoff=b_cutoff,
     )
     return out_wb, stats
 
@@ -918,7 +1063,10 @@ def build_epicentr_combined_report(
     ref_wb = open_delivery_workbook(reference_file) if reference_file else None
     price_wb = open_delivery_workbook(price_file) if price_file else None
     delivery_wb = open_delivery_workbook(delivery_file) if delivery_file else None
-    abc_by_article, abc_by_name = parse_abc_files(abc_files) if abc_files else ({}, {})
+    abc_by_article, abc_by_name, qty_by_article, qty_by_name = (
+        parse_abc_files(abc_files) if abc_files else ({}, {}, {}, {})
+    )
+    b_cutoff = class_quantity_cutoff(abc_by_article, qty_by_article, "B", 0.5)
 
     epicentr_stores = set()
     for f in (mt_season, mt_offseason, bsh_season, bsh_offseason):
@@ -943,7 +1091,7 @@ def build_epicentr_combined_report(
         out_ws = out_wb.create_sheet(title=label)
         all_stats[label] = _write_epicentr_sheet(
             out_ws, season_f, offseason_f, ref_wb, price_wb, delivery_wb, abc_by_article, abc_by_name,
-            network_abc,
+            network_abc, qty_by_article=qty_by_article, qty_by_name=qty_by_name, b_cutoff=b_cutoff,
         )
 
     if network_stores:
@@ -1215,15 +1363,185 @@ def _write_store_totals_sheet(out_ws, store_data, abc_result):
         out_ws.cell(row=r, column=5, value=abc_result.get(key))
 
 
+# --- Дозаповнення листів Total після ручного коригування "НОВА АМ" ---
+#
+# Окремий, наступний крок: користувач завантажує вже готовий звід (той,
+# що згенерував сам застосунок і в якому вручну доправив персикові й
+# жовті клітинки "НОВА АМ" в Excel), і отримує той самий файл, де на
+# листах Total/Total_МТ/Total_БШ дозаповнені лічильники по кожному
+# магазину. Структура листа-матриці шукається за назвами заголовків
+# (рядок з "НОВА АМ"), а не за фіксованими номерами рядків - так це не
+# зламається, навіть якщо користувач вручну додав/прибрав рядок.
+
+TOTAL_SHEET_PAIRS = [("Звід", "Total"), ("МТ", "Total_МТ"), ("БШ", "Total_БШ")]
+TOTAL_NEW_HEADERS = [
+    "A", "B", "C", "Новинки", "Всього СКЮ",
+    "Старий асортимент", "Залишок активного асортименту не в АМ",
+]
+
+
+def _empty_counts_bucket():
+    return {
+        "A": 0, "B": 0, "C": 0, "Новинки": 0,
+        "Старий асортимент": 0, "Залишок не в АМ": 0,
+    }
+
+
+def _count_nova_am_by_class(ws):
+    """
+    Розбирає лист-матрицю (Звід / МТ / БШ) вже готового зводу. Повертає
+    {назва_магазину: {...}} з лічильниками по кожному магазину:
+      "A"/"B"/"C"    - товари з "НОВА АМ" = 1 у цього магазину і класом
+                       ("Категорія") A/B/C відповідно;
+      "Новинки"      - товари з "НОВА АМ" = 1 у цього магазину і "Статус
+                       артикула" = "NEW";
+      "Старий асортимент" - товари зі "Статус артикула" = 8 (не входять у
+                       жоден з лічильників вище), у яких "Залишок" у
+                       цього магазину > 0;
+      "Залишок не в АМ" - товари зі "Статус артикула" = 1, "НОВА АМ" = 0
+                       і "Залишок" > 0 у цього магазину (актуальний товар,
+                       якому вирішили не бути в новій АМ, але залишок ще
+                       фізично є).
+    "Залишок" для конкретного магазину береться з колонки одразу ліворуч
+    від його "НОВА АМ" (в обох форматах - Антошка і Епіцентр - поля
+    магазину завжди йдуть у порядку "... АМ, Залишок, НОВА АМ").
+    """
+    header_row = None
+    for r in range(1, min(ws.max_row, 10) + 1):
+        for c in range(1, ws.max_column + 1):
+            if ws.cell(row=r, column=c).value == "НОВА АМ":
+                header_row = r
+                break
+        if header_row is not None:
+            break
+    if header_row is None:
+        return {}
+
+    store_row = header_row - 1
+    nova_am_cols = [c for c in range(1, ws.max_column + 1) if ws.cell(row=header_row, column=c).value == "НОВА АМ"]
+
+    category_col = status_col = None
+    for c in range(1, ws.max_column + 1):
+        v = ws.cell(row=header_row, column=c).value
+        if v == "Категорія" and category_col is None:
+            category_col = c
+        elif v == "Статус артикула" and status_col is None:
+            status_col = c
+
+    counts = {}
+    for r in range(header_row + 1, ws.max_row + 1):
+        status = ws.cell(row=r, column=status_col).value if status_col else None
+        status_is_8 = status == 8
+        status_is_1 = status == 1
+        category = ws.cell(row=r, column=category_col).value if category_col else None
+        cls = _class_letter(category)
+        is_new = isinstance(status, str) and status.strip().upper() == "NEW"
+
+        if not (status_is_8 or status_is_1 or cls is not None or is_new):
+            continue  # цей рядок не додасть нічого в жоден лічильник
+
+        for col in nova_am_cols:
+            store = ws.cell(row=store_row, column=col).value
+            if store is None:
+                continue
+            nova_am_val = ws.cell(row=r, column=col).value
+            zal_val = ws.cell(row=r, column=col - 1).value
+            has_stock = isinstance(zal_val, (int, float)) and zal_val > 0
+
+            if status_is_8:
+                if has_stock:
+                    counts.setdefault(store, _empty_counts_bucket())["Старий асортимент"] += 1
+                continue  # статус 8 не входить у жоден інший лічильник
+
+            if nova_am_val == 1:
+                bucket = counts.setdefault(store, _empty_counts_bucket())
+                if cls in ("A", "B", "C"):
+                    bucket[cls] += 1
+                if is_new:
+                    bucket["Новинки"] += 1
+            elif status_is_1 and nova_am_val == 0 and has_stock:
+                counts.setdefault(store, _empty_counts_bucket())["Залишок не в АМ"] += 1
+    return counts
+
+
+def _augment_total_sheet(total_ws, counts_by_store):
+    """Дописує в total_ws колонки TOTAL_NEW_HEADERS (або оновлює значення
+    в них, якщо вони там вже є - повторний запуск не плодить дублі)."""
+    header_row = 1
+    existing = {total_ws.cell(row=header_row, column=c).value: c for c in range(1, total_ws.max_column + 1)}
+    store_col = existing.get("Магазин", 1)
+
+    next_col = total_ws.max_column + 1
+    cols = {}
+    for name in TOTAL_NEW_HEADERS:
+        if name in existing:
+            cols[name] = existing[name]
+        else:
+            cols[name] = next_col
+            total_ws.cell(row=header_row, column=next_col, value=name)
+            next_col += 1
+
+    n_stores = 0
+    n_sku_total = 0
+    for r in range(2, total_ws.max_row + 1):
+        store = total_ws.cell(row=r, column=store_col).value
+        if store is None:
+            continue
+        n_stores += 1
+        c = counts_by_store.get(store, _empty_counts_bucket())
+        total = c["A"] + c["B"] + c["C"] + c["Новинки"]
+        total_ws.cell(row=r, column=cols["A"], value=c["A"])
+        total_ws.cell(row=r, column=cols["B"], value=c["B"])
+        total_ws.cell(row=r, column=cols["C"], value=c["C"])
+        total_ws.cell(row=r, column=cols["Новинки"], value=c["Новинки"])
+        total_ws.cell(row=r, column=cols["Всього СКЮ"], value=total)
+        total_ws.cell(row=r, column=cols["Старий асортимент"], value=c["Старий асортимент"])
+        total_ws.cell(
+            row=r, column=cols["Залишок активного асортименту не в АМ"], value=c["Залишок не в АМ"]
+        )
+        n_sku_total += total
+
+    return {"n_stores": n_stores, "n_sku_total": n_sku_total}
+
+
+def fill_total_summary(file):
+    """
+    Приймає вже готовий звід (той, що згенерував build_report /
+    build_epicentr_combined_report, і в якому користувач вручну доправив
+    персикові й жовті клітинки "НОВА АМ" в Excel) і дозаповнює наявні
+    листи Total/Total_МТ/Total_БШ колонками "A", "B", "C", "Новинки",
+    "Всього СКЮ" (лічильники товарів з "НОВА АМ" = 1 по кожному
+    магазину). Обробляються тільки ті пари (лист матриці, лист Total),
+    які реально є у файлі - Антошка дає ("Звід", "Total"), Епіцентр дає
+    ("МТ", "Total_МТ") і ("БШ", "Total_БШ"); порожньо, якщо жодної пари
+    не знайдено.
+    Повертає (openpyxl.Workbook, {назва_листа_Total: {"n_stores": ..., "n_sku_total": ...}}).
+    """
+    wb = load_xlsx(read_bytes(file))
+
+    stats = {}
+    for matrix_name, total_name in TOTAL_SHEET_PAIRS:
+        if matrix_name not in wb.sheetnames or total_name not in wb.sheetnames:
+            continue
+        counts_by_store = _count_nova_am_by_class(wb[matrix_name])
+        stats[total_name] = _augment_total_sheet(wb[total_name], counts_by_store)
+
+    return wb, stats
+
+
 def _write_epicentr_sheet(
     out_ws, season_file, offseason_file,
     ref_wb=None, price_wb=None, delivery_wb=None, abc_by_article=None, abc_by_name=None,
-    network_abc=None,
+    network_abc=None, qty_by_article=None, qty_by_name=None, b_cutoff=None,
 ):
     """Пише один лист зводу Епіцентру в out_ws (уже створений). network_abc
     (необов'язковий) - {код_магазину: АВС-клас} з "Мережі продажі", для
-    нового рядка над кодами магазинів. Повертає stats."""
+    нового рядка над кодами магазинів і для автозаповнення "НОВА АМ".
+    qty_by_article/qty_by_name/b_cutoff - те саме, що дає parse_abc_files і
+    class_quantity_cutoff, теж для "НОВА АМ". Повертає stats."""
     network_abc = network_abc or {}
+    qty_by_article = qty_by_article or {}
+    qty_by_name = qty_by_name or {}
     season_wb = open_delivery_workbook(season_file)
     offseason_wb = open_delivery_workbook(offseason_file)
 
@@ -1304,6 +1622,10 @@ def _write_epicentr_sheet(
         category = lookup_category(p_art, all_names.get(art), abc_by_article or {}, abc_by_name or {})
         out_ws.cell(row=r, column=8, value=category)  # Категорія (з АВС-аналізу)
 
+        status_is_8 = p_status == 8
+        product_class = _class_letter(category)
+        product_qty = lookup_abc_qty(p_art, all_names.get(art), qty_by_article, qty_by_name)
+
         for i, store in enumerate(all_stores):
             season_val = season_data.get((art, store))
             offseason_val = offseason_data.get((art, store))
@@ -1318,7 +1640,22 @@ def _write_epicentr_sheet(
             out_ws.cell(row=r, column=start_col + 1, value=ne_sezon_qty)
             out_ws.cell(row=r, column=start_col + 2, value=am_val)
             out_ws.cell(row=r, column=start_col + 3, value=zalyshok)
-            out_ws.cell(row=r, column=start_col + 4, value=None)
+
+            nova_am_cell = out_ws.cell(row=r, column=start_col + 4)
+            if status_is_8:
+                nova_am_cell.value = 0
+            elif not _has_sales(sezon_qty, ne_sezon_qty):
+                if _has_stock(zalyshok):
+                    nova_am_cell.value = 0
+                else:
+                    nova_am_cell.fill = NOVA_AM_PEACH_FILL
+            else:
+                store_class = network_abc.get(_normalize_store_key(store))
+                match = epicentr_assortment_match(store_class, product_class, product_qty, b_cutoff)
+                if match is True:
+                    nova_am_cell.value = 1
+                else:
+                    nova_am_cell.fill = NOVA_AM_YELLOW_FILL
         n_rows += 1
 
     # Кандидати в новинки - так само, як у Антошки: пошук ведеться на
@@ -1333,21 +1670,26 @@ def _write_epicentr_sheet(
     name_col = EPICENTR_DESC_COLS.index("Назва") + 1
     art_col = EPICENTR_DESC_COLS.index("Артикул") + 1
     vdorozi_col = EPICENTR_DESC_COLS.index("В дорозі") + 1
+    status_col = EPICENTR_DESC_COLS.index("Статус артикула") + 1
     r = 4 + n_rows
     for name, art, qty in novelty_candidates:
         out_ws.cell(row=r, column=name_col, value=name)
         out_ws.cell(row=r, column=art_col, value=art)
         out_ws.cell(row=r, column=vdorozi_col, value=qty)
+        out_ws.cell(row=r, column=status_col, value="NEW")
+        for i in range(len(all_stores)):
+            start_col = n_desc_cols + 1 + i * len(EPICENTR_STORE_FIELDS)
+            out_ws.cell(row=r, column=start_col + 4, value=1)
         r += 1
     last_row = r - 1
 
+    # Заголовок "НОВА АМ" - світло-зелена заливка як орієнтир по колонці.
+    # Заливка даних - за результатом розрахунку вище.
     nova_am_idx = EPICENTR_STORE_FIELDS.index("НОВА АМ")
     for i in range(len(all_stores)):
         start_col = n_desc_cols + 1 + i * len(EPICENTR_STORE_FIELDS)
         col = start_col + nova_am_idx
         out_ws.cell(row=3, column=col).fill = NOVA_AM_FILL
-        for row in range(4, last_row + 1):
-            out_ws.cell(row=row, column=col).fill = NOVA_AM_FILL
 
     return {
         "n_products": len(all_articles),
