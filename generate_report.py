@@ -218,13 +218,51 @@ PRODUCT_FIELDS = ["В дорозі", "Статус артикула", "Скла�
 DELIVERY_SHEETS = {
     "Chicco": {"header_row": 2, "data_start": 4, "name_col": 0, "art_col": 1, "status_col": 3, "qty": 5,
                "brand": "CHICCO", "novelty_reliable": True},
-    "Kids2": {"header_row": 2, "data_start": 4, "name_col": 0, "art_col": 1, "status_col": 3, "qty": [7, 8, 9],
-              "brand_col": 5},
+    # Kids2: колонки задані не абсолютними номерами, а зсувом від колонки
+    # "Номенклатура" (anchor_header) - у вивантаженні від 25.09.2026 перед
+    # "Номенклатура" з'явилась ще одна колонка "Артикул", і все зсунулось
+    # на 1 позицію праворуч; абсолютні номери зламались би, а відносний
+    # зсув від "Номенклатура" лишився той самий в обох файлах.
+    "Kids2": {"header_row": 2, "data_start": 4, "anchor_header": "Номенклатура",
+              "name_offset": 0, "art_offset": 1, "status_offset": 3, "brand_offset": 5,
+              "qty_offsets": [7, 8, 9]},
     "Kendamil": {"header_row": 1, "data_start": 2, "name_col": 1, "art_col": 0, "status_col": 2, "qty": 6,
                  "brand": "KENDAMIL"},
     "Offspring": {"header_row": 1, "data_start": 2, "name_col": 1, "art_col": 0, "status_col": 2, "qty": "dynamic",
                   "brand": "OFFSPRING"},
 }
+
+
+def _resolve_delivery_cfg(ws, cfg):
+    """
+    Якщо cfg заданий через "anchor_header" + відносні зсуви (зараз - тільки
+    Kids2) - шукає колонку з таким заголовком (у header_row) і повертає
+    новий cfg з уже обчисленими абсолютними "name_col"/"art_col"/
+    "status_col"/"brand_col"/"qty". Так лист лишається робочим, навіть
+    якщо 1С додасть чи прибере колонку ПЕРЕД якірною - зсув від якоря не
+    зміниться. Якщо cfg і так заданий абсолютними номерами - повертає без
+    змін.
+    """
+    if "anchor_header" not in cfg:
+        return cfg
+    header_row = cfg["header_row"]
+    anchor = _norm_header(cfg["anchor_header"])
+    anchor_col = None
+    for c in range(ws.ncols):
+        if _norm_header(ws.cell_value(header_row, c)) == anchor:
+            anchor_col = c
+            break
+    if anchor_col is None:
+        raise KeyError(f'Не знайдено колонку "{cfg["anchor_header"]}" у рядку заголовків листа')
+
+    resolved = dict(cfg)
+    resolved["name_col"] = anchor_col + cfg["name_offset"]
+    resolved["art_col"] = anchor_col + cfg["art_offset"]
+    resolved["status_col"] = anchor_col + cfg["status_offset"]
+    if "brand_offset" in cfg:
+        resolved["brand_col"] = anchor_col + cfg["brand_offset"]
+    resolved["qty"] = [anchor_col + o for o in cfg["qty_offsets"]]
+    return resolved
 
 
 def normalize_brand(value):
@@ -373,10 +411,11 @@ def parse_delivery_schedule(wb):
     """Возвращает {Артикул: кол-во в дорозі}, суммируя совпадения по всем листам."""
     result = {}
 
-    for sheet_name, cfg in DELIVERY_SHEETS.items():
+    for sheet_name, raw_cfg in DELIVERY_SHEETS.items():
         if sheet_name not in wb.sheet_names():
             continue
         ws = wb.sheet_by_name(sheet_name)
+        cfg = _resolve_delivery_cfg(ws, raw_cfg)
         cols = _qty_cols(ws, cfg)
 
         for r in range(cfg["data_start"], ws.nrows):
@@ -409,12 +448,13 @@ def find_novelty_candidates(wb, existing_articles, contragent_brands):
     candidates = []
     seen = set()
 
-    for sheet_name, cfg in DELIVERY_SHEETS.items():
-        if not cfg.get("novelty_reliable"):
+    for sheet_name, raw_cfg in DELIVERY_SHEETS.items():
+        if not raw_cfg.get("novelty_reliable"):
             continue
         if sheet_name not in wb.sheet_names():
             continue
         ws = wb.sheet_by_name(sheet_name)
+        cfg = _resolve_delivery_cfg(ws, raw_cfg)
         cols = _qty_cols(ws, cfg)
         fixed_brand = normalize_brand(cfg.get("brand"))
 
