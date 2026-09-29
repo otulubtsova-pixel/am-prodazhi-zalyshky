@@ -11,8 +11,9 @@
 Логика:
 - Лист "АМ": для каждого магазина берём "количество АМ" -> колонка АМ,
   "Остатки на дату, шт." -> колонка Залишок.
-- Лист "Продажі 2025": для каждого магазина суммируем "Сумма по столбцу
-  Кол-во Шт" по месяцам, распределяя их в два периода:
+- Лист продаж (название ищем по подстроке "Продаж", год в названии не
+  хардкодим - см. find_sheet_by_name_part): для каждого магазина суммируем
+  "Сумма по столбцу Кол-во Шт" по месяцам, распределяя их в два периода:
     "11 Лис. - 01 Січ."  -> месяцы 11, 12, 01
     "02 Лют. - 10 Жов."  -> месяцы 02..10
   В файле реально есть только Січ-Серп 2025 (рос. названия), поэтому
@@ -155,6 +156,10 @@ class _XlsAsOpenpyxlWorkbook:
     def __getitem__(self, name):
         return _XlsAsOpenpyxlSheet(self._book.sheet_by_name(name))
 
+    @property
+    def sheetnames(self):
+        return self._book.sheet_names()
+
 
 class _XlsxAsXlrdSheet:
     """Оборачивает лист openpyxl (.xlsx, 1-індексація) під API листа xlrd (0-індексація)."""
@@ -263,6 +268,24 @@ def norm(value):
 
 def month_num(period_label):
     return int(str(period_label).strip()[:2])
+
+
+def find_sheet_by_name_part(wb, name_part):
+    """
+    Знаходить перший лист книги, назва якого містить name_part
+    (регістронезалежно) - наприклад "Продажі 2025" чи "Продажі 2026"
+    обидва знайдуться за name_part="Продаж", без хардкоду конкретного
+    року. Якщо збігів декілька - береться перший за порядком листів у
+    книзі. KeyError зі списком наявних листів, якщо жодного не знайдено.
+    """
+    name_part_lower = name_part.lower()
+    for name in wb.sheetnames:
+        if name_part_lower in name.lower():
+            return wb[name]
+    raise KeyError(
+        f'Не знайдено лист, назва якого містить "{name_part}" '
+        f'(наявні листи: {", ".join(wb.sheetnames)})'
+    )
 
 
 def is_excluded_store(name):
@@ -859,7 +882,7 @@ def build_report(src_file, delivery_file, price_file=None, abc_files=None, netwo
         wb = _XlsAsOpenpyxlWorkbook(xlrd.open_workbook(file_contents=src_bytes))
 
     am_store_cols, am_desc, am_data = parse_am_sheet(wb["АМ"])
-    pr_store_periods, pr_desc, pr_data = parse_sales_sheet(wb["Продажі 2025"])
+    pr_store_periods, pr_desc, pr_data = parse_sales_sheet(find_sheet_by_name_part(wb, "Продаж"))
 
     delivery_wb = open_delivery_workbook(delivery_file)
     delivery_data = parse_delivery_schedule(delivery_wb)
