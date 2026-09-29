@@ -514,6 +514,118 @@ def parse_price_list(wb, key_header=PRICE_KEY_HEADER):
     return result
 
 
+# --- Підрахунок СКЮ іграшок у прайс-листі (СКД) ---
+#
+# Прайс-лист - ієрархічний звіт: категорії товарів вкладені одна в одну
+# (бренд -> категорія -> підкатегорія -> ...), і ця вкладеність закодована
+# не текстом, а Excel-групуванням рядків (row_dimensions[r].outlineLevel -
+# те саме "згорнути/розгорнути" з панелі зліва в Excel). Категорія - рядок,
+# де заповнена тільки колонка "Артикул" (там лежить назва категорії, а не
+# сам артикул); товар - рядок, де заповнена "Номенклатура".
+#
+# Кількість і склад брендів у файлі НЕ фіксовані (сьогодні Chicco/
+# Clementoni/KIDS2, завтра можуть бути інші), тому пошук не прив'язаний до
+# конкретних назв брендів - береться будь-яка категорія (на будь-якому
+# рівні вкладеності), де в назві є "іграш" або "игрушк" (регістронезалежно,
+# покриває "Іграшки"/"іграшка"/"Игрушки"/укр. і рос. написання). Усі товари
+# в піддереві такої категорії (разом з вкладеними підкатегоріями, навіть
+# якщо в ЇХ власній назві "іграш"/"игрушк" немає) рахуються як іграшки -
+# піддерево закінчується на першій наступній категорії того самого рівня
+# вкладеності або вищого. Бренд для розбивки результату береться з поля
+# "Бренд" самого товару (а не з назви категорії, де він фізично лежить) -
+# трапляються крос-брендові товари (наприклад товар під категорією
+# "Ingenuity іграшка", але з "Бренд" = "Bright Starts" - обидва суббренди
+# одного правовласника).
+#
+# Винятки (щоб не зловити аксесуари ДЛЯ іграшок, а не самі іграшки,
+# наприклад "Контейнери для іграшок Stokke® MuTable"): категорія НЕ
+# вважається іграшковою, навіть з "іграш"/"игрушк" у назві, якщо там
+# також є "для іграшок", "для игрушек" або "контейнер".
+
+TOY_NAME_PATTERNS = ("іграш", "игрушк")
+TOY_NAME_EXCLUDE_PATTERNS = ("для іграшок", "для игрушек", "контейнер")
+
+
+def _is_toy_category_name(name):
+    if not isinstance(name, str):
+        return False
+    lname = name.strip().lower()
+    if any(p in lname for p in TOY_NAME_EXCLUDE_PATTERNS):
+        return False
+    return any(p in lname for p in TOY_NAME_PATTERNS)
+
+
+def count_toy_skus(file):
+    """
+    Розбирає прайс-лист (звіт "Прайс-лист (СКД)" з 1С УТП - той самий
+    файл і формат, що і parse_price_list) і рахує кількість СКЮ іграшок,
+    окремо по кожному бренду ("Бренд" товару): загальну кількість і
+    скільки з них мають заповнене "Артикул в сети".
+    Повертає {бренд: {"total": ..., "with_artikul_v_seti": ...}}. Порожній
+    словник, якщо на листі немає заголовка "Артикул" або "Номенклатура".
+    """
+    wb = load_xlsx(read_bytes(file))
+    ws = wb[wb.sheetnames[0]]
+
+    header_row = None
+    for r in range(1, min(ws.max_row, 10) + 1):
+        for c in range(1, ws.max_column + 1):
+            if _norm_header(ws.cell(row=r, column=c).value) == PRICE_KEY_HEADER:
+                header_row = r
+                break
+        if header_row is not None:
+            break
+    if header_row is None:
+        return {}
+
+    key_col = name_col = brand_col = network_key_col = None
+    for c in range(1, ws.max_column + 1):
+        h = _norm_header(ws.cell(row=header_row, column=c).value)
+        if h == PRICE_KEY_HEADER and key_col is None:
+            key_col = c
+        elif h == PRICE_NAME_HEADER and name_col is None:
+            name_col = c
+        elif h == PRICE_BRAND_HEADER and brand_col is None:
+            brand_col = c
+        elif h == PRICE_NETWORK_KEY_HEADER and network_key_col is None:
+            network_key_col = c
+
+    if key_col is None or name_col is None:
+        return {}
+
+    counts = {}
+    in_toy_subtree = False
+    toy_level = None
+    for r in range(header_row + 1, ws.max_row + 1):
+        col1 = ws.cell(row=r, column=key_col).value
+        nomenklatura = ws.cell(row=r, column=name_col).value
+        is_category = col1 not in ("", None) and nomenklatura in ("", None)
+
+        if is_category:
+            rd = ws.row_dimensions.get(r)
+            lvl = rd.outlineLevel if rd else 0
+            if in_toy_subtree and lvl <= toy_level:
+                in_toy_subtree = False
+                toy_level = None
+            if not in_toy_subtree and _is_toy_category_name(col1):
+                in_toy_subtree = True
+                toy_level = lvl
+            continue
+
+        if not in_toy_subtree:
+            continue
+
+        brand = ws.cell(row=r, column=brand_col).value if brand_col else None
+        brand = str(brand).strip() if brand not in ("", None) else "(без бренду)"
+        bucket = counts.setdefault(brand, {"total": 0, "with_artikul_v_seti": 0})
+        bucket["total"] += 1
+        network_key = ws.cell(row=r, column=network_key_col).value if network_key_col else None
+        if network_key not in ("", None):
+            bucket["with_artikul_v_seti"] += 1
+
+    return counts
+
+
 # --- АВС-аналіз продажів (звіт "АВС-аналіз продажів (за номенклатурою)" з
 # 1С УТП) - для поля "Категорія" ---
 #
@@ -1378,6 +1490,10 @@ TOTAL_NEW_HEADERS = [
     "A", "B", "C", "Новинки", "Всього СКЮ",
     "Старий асортимент", "Залишок активного асортименту не в АМ",
 ]
+TOTAL_PRICE_HEADERS = [
+    "Всього скю прайс", "Всього скю прайс мережі",
+    "% представленості прайс", "% представленості до акт ас з ПРАЙСУ",
+]
 
 
 def _empty_counts_bucket():
@@ -1464,22 +1580,34 @@ def _count_nova_am_by_class(ws):
     return counts
 
 
-def _augment_total_sheet(total_ws, counts_by_store):
+def _augment_total_sheet(total_ws, counts_by_store, price_totals=None):
     """Дописує в total_ws колонки TOTAL_NEW_HEADERS (або оновлює значення
-    в них, якщо вони там вже є - повторний запуск не плодить дублі)."""
+    в них, якщо вони там вже є - повторний запуск не плодить дублі).
+    price_totals (необов'язковий) - {"total": ..., "with_artikul_v_seti": ...}
+    з count_toy_skus (сумарно по всіх брендах прайс-листа) - якщо переданий,
+    додатково дописує TOTAL_PRICE_HEADERS: те саме число СКЮ прайс-листа в
+    кожному рядку магазину (воно з прайс-листа, не з конкретного магазину),
+    і два відсотки представленості від нього."""
     header_row = 1
     existing = {total_ws.cell(row=header_row, column=c).value: c for c in range(1, total_ws.max_column + 1)}
     store_col = existing.get("Магазин", 1)
 
+    headers_to_ensure = list(TOTAL_NEW_HEADERS)
+    if price_totals is not None:
+        headers_to_ensure += TOTAL_PRICE_HEADERS
+
     next_col = total_ws.max_column + 1
     cols = {}
-    for name in TOTAL_NEW_HEADERS:
+    for name in headers_to_ensure:
         if name in existing:
             cols[name] = existing[name]
         else:
             cols[name] = next_col
             total_ws.cell(row=header_row, column=next_col, value=name)
             next_col += 1
+
+    price_sku_total = price_totals["total"] if price_totals else None
+    price_sku_network = price_totals["with_artikul_v_seti"] if price_totals else None
 
     n_stores = 0
     n_sku_total = 0
@@ -1501,30 +1629,60 @@ def _augment_total_sheet(total_ws, counts_by_store):
         )
         n_sku_total += total
 
-    return {"n_stores": n_stores, "n_sku_total": n_sku_total}
+        if price_totals is not None:
+            total_ws.cell(row=r, column=cols["Всього скю прайс"], value=price_sku_total)
+            total_ws.cell(row=r, column=cols["Всього скю прайс мережі"], value=price_sku_network)
+
+            pct1 = total_ws.cell(row=r, column=cols["% представленості прайс"])
+            pct1.value = (total / price_sku_total) if price_sku_total else None
+            pct1.number_format = "0.0%"
+
+            pct2 = total_ws.cell(row=r, column=cols["% представленості до акт ас з ПРАЙСУ"])
+            pct2.value = (total / price_sku_network) if price_sku_network else None
+            pct2.number_format = "0.0%"
+
+    result = {"n_stores": n_stores, "n_sku_total": n_sku_total}
+    if price_totals is not None:
+        result["price_sku_total"] = price_sku_total
+        result["price_sku_network"] = price_sku_network
+    return result
 
 
-def fill_total_summary(file):
+def fill_total_summary(file, price_file=None):
     """
     Приймає вже готовий звід (той, що згенерував build_report /
     build_epicentr_combined_report, і в якому користувач вручну доправив
     персикові й жовті клітинки "НОВА АМ" в Excel) і дозаповнює наявні
     листи Total/Total_МТ/Total_БШ колонками "A", "B", "C", "Новинки",
-    "Всього СКЮ" (лічильники товарів з "НОВА АМ" = 1 по кожному
-    магазину). Обробляються тільки ті пари (лист матриці, лист Total),
-    які реально є у файлі - Антошка дає ("Звід", "Total"), Епіцентр дає
-    ("МТ", "Total_МТ") і ("БШ", "Total_БШ"); порожньо, якщо жодної пари
-    не знайдено.
-    Повертає (openpyxl.Workbook, {назва_листа_Total: {"n_stores": ..., "n_sku_total": ...}}).
+    "Всього СКЮ", "Старий асортимент", "Залишок активного асортименту не
+    в АМ" (лічильники товарів по кожному магазину). Обробляються тільки ті
+    пари (лист матриці, лист Total), які реально є у файлі - Антошка дає
+    ("Звід", "Total"), Епіцентр дає ("МТ", "Total_МТ") і ("БШ", "Total_БШ");
+    порожньо, якщо жодної пари не знайдено.
+    price_file (необов'язковий) - прайс-лист будь-якої мережі (той самий
+    формат, що бере count_toy_skus). Якщо переданий - додатково дописує
+    "Всього скю прайс" / "Всього скю прайс мережі" (те саме число СКЮ
+    прайс-листа - усього і з "Артикул в сети" - в кожному рядку кожного
+    листа Total) і два відсотки представленості від "Всього СКЮ" цього
+    магазину.
+    Повертає (openpyxl.Workbook, {назва_листа_Total: {статистика}}).
     """
     wb = load_xlsx(read_bytes(file))
+
+    price_totals = None
+    if price_file is not None:
+        by_brand = count_toy_skus(price_file)
+        price_totals = {
+            "total": sum(v["total"] for v in by_brand.values()),
+            "with_artikul_v_seti": sum(v["with_artikul_v_seti"] for v in by_brand.values()),
+        }
 
     stats = {}
     for matrix_name, total_name in TOTAL_SHEET_PAIRS:
         if matrix_name not in wb.sheetnames or total_name not in wb.sheetnames:
             continue
         counts_by_store = _count_nova_am_by_class(wb[matrix_name])
-        stats[total_name] = _augment_total_sheet(wb[total_name], counts_by_store)
+        stats[total_name] = _augment_total_sheet(wb[total_name], counts_by_store, price_totals)
 
     return wb, stats
 
