@@ -1487,7 +1487,7 @@ def _write_store_totals_sheet(out_ws, store_data, abc_result):
 
 TOTAL_SHEET_PAIRS = [("Звід", "Total"), ("МТ", "Total_МТ"), ("БШ", "Total_БШ")]
 TOTAL_NEW_HEADERS = [
-    "A", "B", "C", "Новинки", "Всього СКЮ",
+    "A", "B", "C", "Новинки", "Без категорії", "Всього СКЮ",
     "Старий асортимент", "Залишок активного асортименту не в АМ",
 ]
 TOTAL_PRICE_HEADERS = [
@@ -1498,7 +1498,7 @@ TOTAL_PRICE_HEADERS = [
 
 def _empty_counts_bucket():
     return {
-        "A": 0, "B": 0, "C": 0, "Новинки": 0,
+        "A": 0, "B": 0, "C": 0, "Новинки": 0, "Без категорії": 0,
         "Старий асортимент": 0, "Залишок не в АМ": 0,
     }
 
@@ -1506,11 +1506,20 @@ def _empty_counts_bucket():
 def _count_nova_am_by_class(ws):
     """
     Розбирає лист-матрицю (Звід / МТ / БШ) вже готового зводу. Повертає
-    {назва_магазину: {...}} з лічильниками по кожному магазину:
+    {назва_магазину: {...}} з лічильниками по КОЖНОМУ магазину матриці
+    (навіть якщо в нього все по нулях - наприклад, магазин не знайшовся у
+    "Мережі продажі" і тому не потрапив у лист Total на етапі побудови
+    зводу; тут він все одно з'явиться, з нульовими лічильниками):
       "A"/"B"/"C"    - товари з "НОВА АМ" = 1 у цього магазину і класом
                        ("Категорія") A/B/C відповідно;
       "Новинки"      - товари з "НОВА АМ" = 1 у цього магазину і "Статус
                        артикула" = "NEW";
+      "Без категорії" - товари з "НОВА АМ" = 1 у цього магазину, чий клас
+                       не розпізнано як A/B/C (наприклад "Категорія" не
+                       заповнена - товар не потрапив у жоден з файлів
+                       АВС-аналізу) і це не новинка - без цього поля такі
+                       товари взагалі не потрапляли б у жоден лічильник,
+                       хоча людина вручну вирішила тримати їх в асортименті;
       "Старий асортимент" - товари зі "Статус артикула" = 8 (не входять у
                        жоден з лічильників вище), у яких "Залишок" у
                        цього магазину > 0;
@@ -1544,7 +1553,15 @@ def _count_nova_am_by_class(ws):
         elif v == "Статус артикула" and status_col is None:
             status_col = c
 
+    # Ініціалізуємо нулями кожен магазин матриці одразу - навіть якщо в нього
+    # взагалі немає жодної клітинки, що щось інкрементує (наприклад "НОВА АМ"
+    # скрізь порожня), він все одно має потрапити в результат.
     counts = {}
+    for col in nova_am_cols:
+        store = ws.cell(row=store_row, column=col).value
+        if store is not None:
+            counts.setdefault(store, _empty_counts_bucket())
+
     for r in range(header_row + 1, ws.max_row + 1):
         status = ws.cell(row=r, column=status_col).value if status_col else None
         status_is_8 = status == 8
@@ -1552,9 +1569,6 @@ def _count_nova_am_by_class(ws):
         category = ws.cell(row=r, column=category_col).value if category_col else None
         cls = _class_letter(category)
         is_new = isinstance(status, str) and status.strip().upper() == "NEW"
-
-        if not (status_is_8 or status_is_1 or cls is not None or is_new):
-            continue  # цей рядок не додасть нічого в жоден лічильник
 
         for col in nova_am_cols:
             store = ws.cell(row=store_row, column=col).value
@@ -1573,11 +1587,43 @@ def _count_nova_am_by_class(ws):
                 bucket = counts.setdefault(store, _empty_counts_bucket())
                 if cls in ("A", "B", "C"):
                     bucket[cls] += 1
-                if is_new:
+                elif is_new:
                     bucket["Новинки"] += 1
+                else:
+                    bucket["Без категорії"] += 1
             elif status_is_1 and nova_am_val == 0 and has_stock:
                 counts.setdefault(store, _empty_counts_bucket())["Залишок не в АМ"] += 1
     return counts
+
+
+def _write_counts_row(total_ws, r, cols, c, price_sku_total, price_sku_network):
+    """Пише лічильники c (з counts_by_store) у рядок r листа Total.
+    Повертає "Всього СКЮ" цього рядка."""
+    total = c["A"] + c["B"] + c["C"] + c["Новинки"] + c["Без категорії"]
+    total_ws.cell(row=r, column=cols["A"], value=c["A"])
+    total_ws.cell(row=r, column=cols["B"], value=c["B"])
+    total_ws.cell(row=r, column=cols["C"], value=c["C"])
+    total_ws.cell(row=r, column=cols["Новинки"], value=c["Новинки"])
+    total_ws.cell(row=r, column=cols["Без категорії"], value=c["Без категорії"])
+    total_ws.cell(row=r, column=cols["Всього СКЮ"], value=total)
+    total_ws.cell(row=r, column=cols["Старий асортимент"], value=c["Старий асортимент"])
+    total_ws.cell(
+        row=r, column=cols["Залишок активного асортименту не в АМ"], value=c["Залишок не в АМ"]
+    )
+
+    if price_sku_total is not None or price_sku_network is not None:
+        total_ws.cell(row=r, column=cols["Всього скю прайс"], value=price_sku_total)
+        total_ws.cell(row=r, column=cols["Всього скю прайс мережі"], value=price_sku_network)
+
+        pct1 = total_ws.cell(row=r, column=cols["% представленості прайс"])
+        pct1.value = (total / price_sku_total) if price_sku_total else None
+        pct1.number_format = "0.0%"
+
+        pct2 = total_ws.cell(row=r, column=cols["% представленості до акт ас з ПРАЙСУ"])
+        pct2.value = (total / price_sku_network) if price_sku_network else None
+        pct2.number_format = "0.0%"
+
+    return total
 
 
 def _augment_total_sheet(total_ws, counts_by_store, price_totals=None):
@@ -1587,7 +1633,13 @@ def _augment_total_sheet(total_ws, counts_by_store, price_totals=None):
     з count_toy_skus (сумарно по всіх брендах прайс-листа) - якщо переданий,
     додатково дописує TOTAL_PRICE_HEADERS: те саме число СКЮ прайс-листа в
     кожному рядку магазину (воно з прайс-листа, не з конкретного магазину),
-    і два відсотки представленості від нього."""
+    і два відсотки представленості від нього.
+    Магазини, які є в counts_by_store (тобто реально є в листі-матриці), але
+    яких немає серед наявних рядків total_ws (не знайшлися свого часу в
+    "Мережі продажі" і тому не потрапили в лист Total при побудові зводу) -
+    дописуються новими рядками в кінець, з порожніми "Адреса"/"Продажі"/
+    "Серед.продажі в міс."/"АВС-клас" (даних звідти нема), але з нормально
+    порахованими лічильниками "НОВА АМ" - вони ж все одно є в цьому магазині."""
     header_row = 1
     existing = {total_ws.cell(row=header_row, column=c).value: c for c in range(1, total_ws.max_column + 1)}
     store_col = existing.get("Магазин", 1)
@@ -1611,35 +1663,26 @@ def _augment_total_sheet(total_ws, counts_by_store, price_totals=None):
 
     n_stores = 0
     n_sku_total = 0
+    seen_stores = set()
+    last_row = 1
     for r in range(2, total_ws.max_row + 1):
         store = total_ws.cell(row=r, column=store_col).value
+        last_row = r
         if store is None:
             continue
         n_stores += 1
+        seen_stores.add(store)
         c = counts_by_store.get(store, _empty_counts_bucket())
-        total = c["A"] + c["B"] + c["C"] + c["Новинки"]
-        total_ws.cell(row=r, column=cols["A"], value=c["A"])
-        total_ws.cell(row=r, column=cols["B"], value=c["B"])
-        total_ws.cell(row=r, column=cols["C"], value=c["C"])
-        total_ws.cell(row=r, column=cols["Новинки"], value=c["Новинки"])
-        total_ws.cell(row=r, column=cols["Всього СКЮ"], value=total)
-        total_ws.cell(row=r, column=cols["Старий асортимент"], value=c["Старий асортимент"])
-        total_ws.cell(
-            row=r, column=cols["Залишок активного асортименту не в АМ"], value=c["Залишок не в АМ"]
-        )
-        n_sku_total += total
+        n_sku_total += _write_counts_row(total_ws, r, cols, c, price_sku_total, price_sku_network)
 
-        if price_totals is not None:
-            total_ws.cell(row=r, column=cols["Всього скю прайс"], value=price_sku_total)
-            total_ws.cell(row=r, column=cols["Всього скю прайс мережі"], value=price_sku_network)
-
-            pct1 = total_ws.cell(row=r, column=cols["% представленості прайс"])
-            pct1.value = (total / price_sku_total) if price_sku_total else None
-            pct1.number_format = "0.0%"
-
-            pct2 = total_ws.cell(row=r, column=cols["% представленості до акт ас з ПРАЙСУ"])
-            pct2.value = (total / price_sku_network) if price_sku_network else None
-            pct2.number_format = "0.0%"
+    r = last_row + 1
+    for store, c in counts_by_store.items():
+        if store in seen_stores:
+            continue
+        total_ws.cell(row=r, column=store_col, value=store)
+        n_stores += 1
+        n_sku_total += _write_counts_row(total_ws, r, cols, c, price_sku_total, price_sku_network)
+        r += 1
 
     result = {"n_stores": n_stores, "n_sku_total": n_sku_total}
     if price_totals is not None:
