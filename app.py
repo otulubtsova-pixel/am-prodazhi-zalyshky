@@ -11,7 +11,6 @@ share.streamlit.io, указав app.py как главный файл.
 """
 
 import io
-from pathlib import Path
 
 import streamlit as st
 
@@ -108,11 +107,10 @@ with tab_antoshka:
             c4.metric("Кандидатів у новинки", stats["n_novelty"])
             c5.metric("Магазинів в АВС-аналізі", stats["n_network_stores"])
 
-            out_name = f"Звід_{Path(src_file.name).stem}.xlsx"
             st.download_button(
                 "Завантажити звід (.xlsx)",
                 data=buf,
-                file_name=out_name,
+                file_name="ANTOSHKA_AM_WORK_FILE.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="antoshka_download",
             )
@@ -320,11 +318,10 @@ with tab_epicentr:
                     f"«Залишок» взято з файлу **{stats['zalyshok_period']}**. {ref_info}."
                 )
 
-            out_name = f"Звід_Епіцентр_{Path(mt_season_file.name).stem}.xlsx"
             st.download_button(
                 "Завантажити звід (.xlsx)",
                 data=buf,
-                file_name=out_name,
+                file_name="EPITSENTR_AM_WORK_FILE.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="epicentr_download",
             )
@@ -444,7 +441,12 @@ with tab_total:
                             f"{s['price_sku_network']} з «Артикул в сети»."
                         )
 
-                out_name = f"Дозаповнено_{Path(total_src_file.name).stem}.xlsx"
+                if "Total" in fill_stats:
+                    out_name = "ANTOSHKA_AM_RESULT.xlsx"
+                elif "Total_МТ" in fill_stats or "Total_БШ" in fill_stats:
+                    out_name = "EPITSENTR_AM_RESULT.xlsx"
+                else:
+                    out_name = "AM_RESULT.xlsx"
                 st.download_button(
                     "Завантажити оновлений файл (.xlsx)",
                     data=buf,
