@@ -28,30 +28,40 @@
   и товаров из обоих листов) - так видно и то, где сейчас нет ни АМ,
   ни продаж (кандидаты на НОВА АМ).
 - "Графік поставок ...xls": даёт поле товарного (не магазинного) уровня
-  "В дорозі" - джойн по "Артикул" (а не "Но_"), используются только листы,
-  где есть и артикул, и статус, и количество: Chicco, Kids2, Offspring,
-  Kendamil. Остальные листы (без количества и/или статуса, либо вовсе без
-  артикула) пропускаются. "В дорозі" = сумма количества "в пути" по всем
-  совпавшим листам. Пусто и 0 - РАЗНЫЕ случаи и оба показываются как есть:
-  пусто = артикула вообще нет в графике поставок; 0 = артикул найден, но
-  сейчас по нему ничего не едет.
-- "Новинка" НЕ определяется джойном по артикулу с уже существующим
-  ассортиментом контрагента: товар, который уже есть в списке контрагента
-  (на листах "АМ"/"Продажі"), по определению не может быть новинкой -
-  у него уже есть статус в системе. Ищется ТОЛЬКО на листе "Chicco" -
-  только там подтверждено, что "пустой Статус артикула" реально значит
-  новинку (см. novelty_reliable в DELIVERY_SHEETS); на Kids2/Offspring/
-  Kendamil пустой статус может быть по другим причинам, это не
-  проверялось, поэтому они не используются для новинок (для "В дорозі"
-  используются все 4). Строка считается новинкой, если на листе Chicco
-  "Статус артикула" пуст, количество "в дорозі" больше нуля (иначе товар
-  пока не интересен) и бренд строки (CHICCO) входит в бренды контрагента -
-  если у контрагента вообще нет Chicco в ассортименте, список новинок
-  будет пустым, и это ожидаемо (например, для БебіШоп). Найденные строки
-  добавляются в отчёт ОТДЕЛЬНЫМИ строками в самом низу: заполняются
-  "Наименование товара", "Артикул" (только если он реально есть в графике -
-  если его там нет, поле остаётся пустым, ничем не подменяется) и
-  "В дорозі". Остальные поля пустые.
+  "В дорозі" - джойн по "Артикул" (а не "Но_"). Формат графіка поставок
+  уніфікований по всіх листах (Chicco, Kids2, Graco, Babybrezza, Kendemil,
+  Tutti Bambini, Stokke-YOYO, Offspring, Clementoni та інші - перелік НЕ
+  фіксований, беруться ВСІ листи книги): "Номенклатура", "Артикул",
+  "Артикул поставщика", "Статус артикула", "Товарна категорія", "Всього" -
+  решта колонок (графіки поставок по датах) не читаються. "В дорозі" =
+  значення готової колонки "Всього", просумоване по всіх листах, де
+  знайдено артикул. Пусто і 0 - РІЗНІ випадки і обидва показуються як є:
+  пусто = артикула взагалі нема в графіку поставок; 0 = артикул знайдено,
+  але зараз по ньому нічого не їде.
+- "Новинка" НЕ визначається джойном по артикулу з уже існуючим
+  асортиментом контрагента: товар, який вже є в списку контрагента (на
+  листах "АМ"/"Продажі"), за визначенням не може бути новинкою - у нього
+  вже є статус у системі. Шукається на ВСІХ листах графіка поставок, де
+  "Статус артикула" дослівно (регістронезалежно) дорівнює "new" - це
+  прямо позначено в файлі, жодних здогадок за порожнім статусом більше не
+  потрібно (раніше це вважалось надійним тільки для Chicco), і кількість
+  "в дорозі" більша за нуль (інакше товар поки не цікавий - його ще навіть
+  не замовили). Бренд рядка фільтрується ЗАВЖДИ категоріально, за тим
+  самим принципом, що і для прайс-листа (_split_price_totals_by_network) і
+  для Епіцентру: бренд "Chicco" - це МТ (Мілленіум Трейд), усі інші бренди
+  графіка поставок - БШ (БебіШоп); жодного порівняння з тим, що вже є в
+  поточному асортименті чи продажах контрагента - новинка щойно запущеного
+  бренду (ще жодної позиції в продажах) так само проходить. Виняток - лист
+  "Kids2": там декілька суббрендів одразу (Bright Starts / Ingenuity / Baby
+  Einstein), без окремої колонки "Бренд" - суббренд намагаємось дістати з
+  кінця "Номенклатура" (стійкий патерн файлу - бренд іде останнім словом
+  перед "™") лише для красивого відображення (Kids2 і так не Chicco, на
+  категоріальний поділ це не впливає); якщо не вдалось розпізнати - бренд
+  у звіті проставляється як "Kids2" з ЧЕРВОНОЮ заливкою клітинки - ознака,
+  що потрібна перевірка людиною. Якщо у товару немає "Артикул" - лишається
+  порожнім, нічим не підміняється. Знайдені рядки додаються в звіт
+  ОКРЕМИМИ рядками в самому низу: заповнюються "Наименование товара",
+  "Артикул", "Торговая Марка" і "В дорозі" - решта полів порожні.
 """
 
 import io
@@ -67,6 +77,7 @@ from openpyxl.styles import PatternFill
 NOVA_AM_FILL = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
 NOVA_AM_PEACH_FILL = PatternFill(start_color="FFDAB9", end_color="FFDAB9", fill_type="solid")
 NOVA_AM_YELLOW_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+BRAND_UNCERTAIN_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
 
 SRC = "АМ+продажі+залишки_Міленіум_контрагент.xlsx"
 DELIVERY_SRC = "Графік поставок 04,09,2026.xls"
@@ -133,6 +144,26 @@ class _Cell:
         self.value = value
 
 
+class _RowDim:
+    __slots__ = ("outlineLevel",)
+
+    def __init__(self, outline_level):
+        self.outlineLevel = outline_level
+
+
+class _XlsRowDimensions:
+    """Емулює ws.row_dimensions openpyxl (1-індексація, .get(row).outlineLevel)
+    для xls-листа - бере rowinfo_map xlrd (доступний лише якщо книга
+    відкрита з formatting_info=True; якщо даних немає - рівень 0)."""
+
+    def __init__(self, xlrd_sheet):
+        self._sheet = xlrd_sheet
+
+    def get(self, row):
+        rowinfo = self._sheet.rowinfo_map.get(row - 1) if hasattr(self._sheet, "rowinfo_map") else None
+        return _RowDim(rowinfo.outline_level if rowinfo else 0)
+
+
 class _XlsAsOpenpyxlSheet:
     """Оборачивает лист xlrd (.xls, 0-индексация) под API листа openpyxl (1-индексация)."""
 
@@ -140,6 +171,7 @@ class _XlsAsOpenpyxlSheet:
         self._sheet = xlrd_sheet
         self.max_row = xlrd_sheet.nrows
         self.max_column = xlrd_sheet.ncols
+        self.row_dimensions = _XlsRowDimensions(xlrd_sheet)
 
     def cell(self, row, column):
         r, c = row - 1, column - 1
@@ -202,67 +234,74 @@ DESC_COLS = [
 
 PRODUCT_FIELDS = ["В дорозі", "Статус артикула", "Склад", "Категорія"]
 
-# На каждом листе: колонка названия, артикула, статуса, и способ получить
-# количество "в пути" - либо номер одной готовой колонки-итога (int),
-# либо список колонок для суммирования, либо "dynamic" - колонки
-# определяются по названию в шапке (для "плавающих" колонок, где их
-# число меняется со временем, как "Замовлення N" у Offspring).
-# "brand" - лист целиком про один бренд (используется для фильтрации
-# новинок по бренду контрагента). "brand_col" - лист про несколько
-# брендов, бренд читается из этой колонки построчно (Kids2).
-# "novelty_reliable" - на этом листе "пустой Статус артикула" реально
-# значит новинку (подтверждено только для Chicco; на остальных листах
-# статус может быть пуст по совсем другим причинам, не значит "новый").
-# Используется для "В дорозі" (все 4 листа), но для поиска новинок -
-# только листы с novelty_reliable=True.
-DELIVERY_SHEETS = {
-    "Chicco": {"header_row": 2, "data_start": 4, "name_col": 0, "art_col": 1, "status_col": 3, "qty": 5,
-               "brand": "CHICCO", "novelty_reliable": True},
-    # Kids2: колонки задані не абсолютними номерами, а зсувом від колонки
-    # "Номенклатура" (anchor_header) - у вивантаженні від 25.09.2026 перед
-    # "Номенклатура" з'явилась ще одна колонка "Артикул", і все зсунулось
-    # на 1 позицію праворуч; абсолютні номери зламались би, а відносний
-    # зсув від "Номенклатура" лишився той самий в обох файлах.
-    "Kids2": {"header_row": 2, "data_start": 4, "anchor_header": "Номенклатура",
-              "name_offset": 0, "art_offset": 1, "status_offset": 3, "brand_offset": 5,
-              "qty_offsets": [7, 8, 9]},
-    "Kendamil": {"header_row": 1, "data_start": 2, "name_col": 1, "art_col": 0, "status_col": 2, "qty": 6,
-                 "brand": "KENDAMIL"},
-    "Offspring": {"header_row": 1, "data_start": 2, "name_col": 1, "art_col": 0, "status_col": 2, "qty": "dynamic",
-                  "brand": "OFFSPRING"},
+# Формат графіка поставок уніфікований по всіх листах (перелік листів НЕ
+# фіксований - беруться всі листи книги): рядок заголовків шукається за
+# назвою колонки "Номенклатура" (перші DELIVERY_HEADER_SCAN_ROWS рядків
+# листа - в різних листах заголовки можуть бути зсунуті вниз на 1-2 рядки
+# через службові рядки над ними), решта колонок - за назвою в тому самому
+# рядку: "Артикул" (ключ джойну), "Статус артикула" (префіксний пошук
+# "статус арти" - охоплює й одруківку "Статус артикла" на листі Chicco),
+# "Всього" (готова колонка кількості "в дорозі" - сумувати нічого вже не
+# треба).
+DELIVERY_HEADER_NOMENCLATURE = "номенклатура"
+DELIVERY_HEADER_ARTICLE = "артикул"
+DELIVERY_HEADER_STATUS_PREFIX = "статус арти"
+DELIVERY_HEADER_QTY = "всего"
+DELIVERY_HEADER_SCAN_ROWS = 10
+
+# Бренд рядка для категоріального поділу МТ/БШ (див. find_novelty_candidates)
+# - назва листа. Ключ - normalize_brand(назва листа), значення - виправлена,
+# гарно написана назва бренду для запису в звіт: лист "Kendemil" (одруківка)
+# показується в звіті як "Kendamil", "Stokke-YOYO" (складена назва) - як
+# "Stokke". На сам категоріальний поділ (Chicco чи ні) це не впливає -
+# жоден із цих двох брендів і так не Chicco.
+DELIVERY_SHEET_BRAND_OVERRIDES = {
+    "KENDEMIL": "Kendamil",
+    "STOKKEYOYO": "Stokke",
 }
 
+# Лист "Kids2" - про декілька суббрендів одразу (Bright Starts / Ingenuity /
+# Baby Einstein), без окремої колонки "Бренд". Суббренд намагаємось дістати
+# з кінця "Номенклатура" - KIDS2_BRAND_SUFFIX_RE (стійкий патерн файлу:
+# справжній бренд іде останнім словом перед символом "™", після закритої
+# лапки назви продуктової лінійки, яка теж може закінчуватись на "™", напр.
+# `"Kick to It™" Baby Einstein™`) - лише для красивого відображення, бо
+# Kids2 і так не Chicco, і на категоріальний поділ не впливає. Якщо патерн
+# не знайшовся - у звіті бренд проставляється як KIDS2_FALLBACK_BRAND з
+# червоною заливкою клітинки (потрібна перевірка людиною).
+KIDS2_SHEET_NAME = "KIDS2"
+KIDS2_FALLBACK_BRAND = "Kids2"
+KIDS2_BRAND_SUFFIX_RE = re.compile(r"([A-Za-z][A-Za-z0-9'’\-. ]*)™$")
 
-def _resolve_delivery_cfg(ws, cfg):
-    """
-    Якщо cfg заданий через "anchor_header" + відносні зсуви (зараз - тільки
-    Kids2) - шукає колонку з таким заголовком (у header_row) і повертає
-    новий cfg з уже обчисленими абсолютними "name_col"/"art_col"/
-    "status_col"/"brand_col"/"qty". Так лист лишається робочим, навіть
-    якщо 1С додасть чи прибере колонку ПЕРЕД якірною - зсув від якоря не
-    зміниться. Якщо cfg і так заданий абсолютними номерами - повертає без
-    змін.
-    """
-    if "anchor_header" not in cfg:
-        return cfg
-    header_row = cfg["header_row"]
-    anchor = _norm_header(cfg["anchor_header"])
-    anchor_col = None
-    for c in range(ws.ncols):
-        if _norm_header(ws.cell_value(header_row, c)) == anchor:
-            anchor_col = c
-            break
-    if anchor_col is None:
-        raise KeyError(f'Не знайдено колонку "{cfg["anchor_header"]}" у рядку заголовків листа')
 
-    resolved = dict(cfg)
-    resolved["name_col"] = anchor_col + cfg["name_offset"]
-    resolved["art_col"] = anchor_col + cfg["art_offset"]
-    resolved["status_col"] = anchor_col + cfg["status_offset"]
-    if "brand_offset" in cfg:
-        resolved["brand_col"] = anchor_col + cfg["brand_offset"]
-    resolved["qty"] = [anchor_col + o for o in cfg["qty_offsets"]]
-    return resolved
+def _find_delivery_header(ws):
+    """
+    Шукає рядок заголовків на листі графіка поставок - див. коментар над
+    DELIVERY_HEADER_*. Повертає (header_row, name_col, art_col, status_col,
+    qty_col) - status_col може бути None, якщо на листі такої колонки нема
+    (тоді новинки на цьому листі просто не шукаються, але "В дорозі" з
+    "Всього" все одно рахується). Повертає None, якщо на листі взагалі
+    нема рядка заголовків такого вигляду (лист іншого, незнайомого
+    формату) - такий лист просто пропускається.
+    """
+    for r in range(min(DELIVERY_HEADER_SCAN_ROWS, ws.nrows)):
+        for c in range(ws.ncols):
+            if _norm_header(ws.cell_value(r, c)) != DELIVERY_HEADER_NOMENCLATURE:
+                continue
+            name_col = c
+            art_col = status_col = qty_col = None
+            for cc in range(ws.ncols):
+                h = _norm_header(ws.cell_value(r, cc))
+                if h == DELIVERY_HEADER_ARTICLE and art_col is None:
+                    art_col = cc
+                elif h is not None and h.startswith(DELIVERY_HEADER_STATUS_PREFIX) and status_col is None:
+                    status_col = cc
+                elif h == DELIVERY_HEADER_QTY and qty_col is None:
+                    qty_col = cc
+            if art_col is None or qty_col is None:
+                return None
+            return r, name_col, art_col, status_col, qty_col
+    return None
 
 
 def normalize_brand(value):
@@ -271,22 +310,10 @@ def normalize_brand(value):
     return "".join(ch for ch in str(value).upper() if ch.isalnum())
 
 
-def _qty_cols(ws, cfg):
-    if cfg["qty"] == "dynamic":
-        header0 = [ws.cell_value(cfg["header_row"] - 1, c) for c in range(ws.ncols)]
-        return [c for c, v in enumerate(header0) if str(v).strip().lower().startswith("замовл")]
-    if isinstance(cfg["qty"], list):
-        return cfg["qty"]
-    return [cfg["qty"]]
+def _extract_kids2_sub_brand(name):
+    m = KIDS2_BRAND_SUFFIX_RE.search(str(name).strip())
+    return m.group(1).strip() if m else None
 
-
-def _row_qty(ws, r, cols):
-    qty = 0
-    for c in cols:
-        v = ws.cell_value(r, c)
-        if isinstance(v, (int, float)):
-            qty += v
-    return qty
 
 GROUP1_LABEL = "11 Лис. - 01 Січ."
 GROUP2_LABEL = "02 Лют. - 10 Жов."
@@ -407,81 +434,152 @@ def open_delivery_workbook(file):
     return _XlsxAsXlrdBook(load_xlsx(data))
 
 
+def _load_readonly_workbook(file):
+    """
+    Те саме, що open_delivery_workbook, але повертає книгу з openpyxl-
+    подібним API (1-індексація, ws.cell(row=, column=), wb[назва_листа],
+    wb.sheetnames) замість xlrd-подібного - для функцій, які написані під
+    openpyxl API, але повинні читати і .xls (formatting_info=True і тут,
+    щоб був доступний row_dimensions/outlineLevel). ТІЛЬКИ для читання -
+    дописувати клітинки в результат не можна (для цього - build_report
+    та інші функції, що самі створюють новий openpyxl.Workbook)."""
+    data = read_bytes(file)
+    fmt = detect_excel_format(data)
+    if fmt == "xlsx":
+        return load_xlsx(data)
+    return _XlsAsOpenpyxlWorkbook(xlrd.open_workbook(file_contents=data, formatting_info=True))
+
+
+def _xls_values_to_openpyxl(xlrd_book):
+    """
+    Конвертує xlrd-книгу (.xls) у справжній, редагований openpyxl.Workbook -
+    копіює значення всіх клітинок на кожному листі (форматування/заливки
+    не переносяться - вони тут і не потрібні, бо далі книга лише
+    ДОПИСУЄТЬСЯ новими колонками). На відміну від _XlsAsOpenpyxlWorkbook
+    (лише для читання), результат можна зберігати і в нього можна писати
+    нові клітинки через звичайний openpyxl API.
+    """
+    new_wb = openpyxl.Workbook()
+    new_wb.remove(new_wb.active)
+    for sheet_name in xlrd_book.sheet_names():
+        sheet = xlrd_book.sheet_by_name(sheet_name)
+        new_ws = new_wb.create_sheet(title=sheet_name)
+        for r in range(sheet.nrows):
+            for c in range(sheet.ncols):
+                value = sheet.cell_value(r, c)
+                if value not in ("", None):
+                    new_ws.cell(row=r + 1, column=c + 1, value=value)
+    return new_wb
+
+
 def parse_delivery_schedule(wb):
-    """Возвращает {Артикул: кол-во в дорозі}, суммируя совпадения по всем листам."""
+    """
+    Повертає {Артикул: кількість в дорозі}, підсумовуючи співпадіння по
+    всіх листах книги (перелік листів не фіксований - беруться всі, для
+    яких знайшовся рядок заголовків, див. _find_delivery_header).
+    Кількість береться напряму з готової колонки "Всього" - формат
+    уніфікований для всіх листів, сумувати декілька колонок уже не треба.
+    """
     result = {}
 
-    for sheet_name, raw_cfg in DELIVERY_SHEETS.items():
-        if sheet_name not in wb.sheet_names():
-            continue
+    for sheet_name in wb.sheet_names():
         ws = wb.sheet_by_name(sheet_name)
-        cfg = _resolve_delivery_cfg(ws, raw_cfg)
-        cols = _qty_cols(ws, cfg)
+        header = _find_delivery_header(ws)
+        if header is None:
+            continue
+        header_row, _name_col, art_col, _status_col, qty_col = header
 
-        for r in range(cfg["data_start"], ws.nrows):
-            art = ws.cell_value(r, cfg["art_col"])
+        for r in range(header_row + 1, ws.nrows):
+            art = ws.cell_value(r, art_col)
             if art in ("", None):
                 continue
             art = norm(art)
-            qty = _row_qty(ws, r, cols)
+            qty = ws.cell_value(r, qty_col)
+            qty = qty if isinstance(qty, (int, float)) else 0
             result[art] = result.get(art, 0) + qty
 
     return result
 
 
-def find_novelty_candidates(wb, existing_articles, contragent_brands):
+def find_novelty_candidates(wb, existing_articles, network):
     """
-    Кандидаты в новинки: строки листов графика поставок с
-    novelty_reliable=True (сейчас только Chicco - только там подтверждено,
-    что "пустой Статус артикула" реально значит новинку; на остальных
-    листах пустой статус может быть по другим причинам, не проверялось)
-    без "Статус артикула" и с ненулевым количеством "в дорозі" (иначе товар
-    не интересен - его пока даже не заказали). Строка учитывается, только
-    если её бренд входит в contragent_brands (бренды, которые реально есть
-    в ассортименте этого контрагента) - если у контрагента нет Chicco,
-    список новинок будет пустым, и это ожидаемо. Товар, уже присутствующий
-    в ассортименте контрагента (existing_articles), новинкой считаться не
-    может - исключаем. Если у товара нет "Артикул" - оставляем пустым,
-    ничем не подменяем (значит его ещё не завели в базу).
-    Возвращает список (Наименование товара, Артикул или None, кол-во).
+    Кандидати в новинки: рядки з усіх листів графіка поставок, де
+    "Статус артикула" дослівно (регістронезалежно) дорівнює "new" - це
+    прямо позначено в файлі на будь-якому листі (раніше це вважалось
+    надійним тільки для Chicco, і новинку доводилось вгадувати за порожнім
+    статусом), і кількість "в дорозі" (колонка "Всього") більша за нуль
+    (інакше товар поки не цікавий - його ще навіть не замовили).
+
+    Фільтр по бренду - ЗАВЖДИ категоріальний, один і той самий для Антошки
+    й Епіцентру, той самий поділ, що і для прайс-листа
+    (_split_price_totals_by_network): network="МТ" - проходять тільки
+    рядки з бренду "Chicco"; network="БШ" - усі інші бренди графіка
+    поставок. Жодного порівняння з тим, які бренди вже є в поточному
+    асортименті чи продажах контрагента - новинка щойно запущеного бренду
+    (ще жодної позиції в продажах) так само проходить.
+
+    Виняток - лист "Kids2" (KIDS2_SHEET_NAME): суббренд намагаємось
+    дістати з "Номенклатура" (_extract_kids2_sub_brand) лише для КРАСИВОГО
+    відображення (Kids2 - точно не Chicco, тому на категоріальний поділ це
+    не впливає - завжди потрапляє в БШ). Якщо суббренд не вдалось
+    розпізнати - у звіті "Торговая Марка"/"Бренд" = KIDS2_FALLBACK_BRAND з
+    позначкою "потрібна перевірка людиною" (прапорець brand_uncertain).
+
+    Товар, уже присутній в асортименті контрагента (existing_articles),
+    новинкою вважатись не може - виключається. Якщо у товару немає
+    "Артикул" - лишається порожнім, нічим не підміняється.
+    Повертає список (Наименование товара, Артикул або None, кількість,
+    бренд для відображення, brand_uncertain).
     """
     candidates = []
     seen = set()
 
-    for sheet_name, raw_cfg in DELIVERY_SHEETS.items():
-        if not raw_cfg.get("novelty_reliable"):
-            continue
-        if sheet_name not in wb.sheet_names():
-            continue
+    for sheet_name in wb.sheet_names():
         ws = wb.sheet_by_name(sheet_name)
-        cfg = _resolve_delivery_cfg(ws, raw_cfg)
-        cols = _qty_cols(ws, cfg)
-        fixed_brand = normalize_brand(cfg.get("brand"))
+        header = _find_delivery_header(ws)
+        if header is None:
+            continue
+        header_row, name_col, art_col, status_col, qty_col = header
+        if status_col is None:
+            continue
 
-        for r in range(cfg["data_start"], ws.nrows):
-            art_raw = ws.cell_value(r, cfg["art_col"])
-            status = ws.cell_value(r, cfg["status_col"])
-            name = ws.cell_value(r, cfg["name_col"])
-            qty = _row_qty(ws, r, cols)
+        is_kids2 = normalize_brand(sheet_name) == KIDS2_SHEET_NAME
+        sheet_brand = DELIVERY_SHEET_BRAND_OVERRIDES.get(normalize_brand(sheet_name), sheet_name)
 
-            if status not in ("", None):
+        for r in range(header_row + 1, ws.nrows):
+            status = ws.cell_value(r, status_col)
+            if str(status).strip().lower() != "new":
                 continue
-            if qty <= 0:
-                continue
+            name = ws.cell_value(r, name_col)
             if name in ("", None):
                 continue
-
-            row_brand = fixed_brand if "brand" in cfg else normalize_brand(ws.cell_value(r, cfg["brand_col"]))
-            if row_brand is None or row_brand not in contragent_brands:
+            qty_val = ws.cell_value(r, qty_col)
+            qty = qty_val if isinstance(qty_val, (int, float)) else 0
+            if qty <= 0:
                 continue
 
+            if is_kids2:
+                sub_brand = _extract_kids2_sub_brand(name)
+                brand_uncertain = sub_brand is None
+                brand_for_filter = sub_brand if sub_brand is not None else KIDS2_FALLBACK_BRAND
+            else:
+                brand_uncertain = False
+                brand_for_filter = sheet_brand
+
+            is_chicco = normalize_brand(brand_for_filter) == "CHICCO"
+            if is_chicco != (network == "МТ"):
+                continue
+
+            display_brand = KIDS2_FALLBACK_BRAND if brand_uncertain else brand_for_filter
+
+            art_raw = ws.cell_value(r, art_col)
             art = norm(art_raw) if art_raw not in ("", None) else None
             if art is not None:
                 if art in existing_articles or art in seen:
                     continue
                 seen.add(art)
 
-            candidates.append((name, art, qty))
+            candidates.append((name, art, qty, display_brand, brand_uncertain))
 
     return candidates
 
@@ -626,8 +724,9 @@ def count_toy_skus(file):
     скільки з них мають заповнене "Артикул в сети".
     Повертає {бренд: {"total": ..., "with_artikul_v_seti": ...}}. Порожній
     словник, якщо на листі немає заголовка "Артикул" або "Номенклатура".
+    Приймає як .xlsx, так і .xls (формат визначається за вмістом файлу).
     """
-    wb = load_xlsx(read_bytes(file))
+    wb = _load_readonly_workbook(file)
     ws = wb[wb.sheetnames[0]]
 
     header_row = None
@@ -912,6 +1011,13 @@ def build_report(src_file, delivery_file, price_file=None, abc_files=None, netwo
     контрагента з "Продажі", "Серед.продажі в міс." і АВС-класом,
     відсортований за спаданням середніх продажів).
     Без цього файлу нова строка і лист Total просто не додаються.
+    Кандидати в новинки з графіка поставок фільтруються категоріально
+    (find_novelty_candidates) за тим самим принципом, що і прайс-лист і
+    Епіцентр: Chicco - це МТ, усі інші бренди - БШ. Яка з двох груп
+    стосується цього контрагента, визначається автоматично - так само, як
+    і для назви файлу (_classify_antoshka_network): за часткою Chicco
+    серед заповнених значень "Торговая Марка" в щойно сформованому зводі
+    (понад 50% - МТ, інакше - БШ).
     Возвращает (openpyxl.Workbook с готовым отчётом, dict со статистикой).
     """
     src_bytes = read_bytes(src_file)
@@ -1024,25 +1130,28 @@ def build_report(src_file, delivery_file, price_file=None, abc_files=None, netwo
                     nova_am_cell.fill = NOVA_AM_YELLOW_FILL
         n_rows += 1
 
-    # Кандидаты в новинки - отдельными строками внизу: название, артикул
-    # (если он есть - без подмены) и кол-во "в дорозі". Остальные поля пустые.
-    # Ищем только среди брендов, которые реально есть у этого контрагента.
+    # Кандидати в новинки - окремими рядками внизу: назва, артикул (якщо
+    # він є - без підміни), кол-во "в дорозі" і бренд. Решта полів порожні.
+    # Фільтр категоріальний (Chicco = МТ, решта = БШ) - мережа визначається
+    # автоматично, за тим самим принципом, що і ім'я файлу
+    # (_classify_antoshka_network, частка Chicco серед "Торговая Марка").
     existing_articles = {norm((am_desc.get(k) or pr_desc.get(k) or {}).get("Артикул")) for k in all_keys}
     existing_articles.discard(None)
-    contragent_brands = {
-        normalize_brand((am_desc.get(k) or pr_desc.get(k) or {}).get("Торговая Марка")) for k in all_keys
-    }
-    contragent_brands.discard(None)
-    novelty_candidates = find_novelty_candidates(delivery_wb, existing_articles, contragent_brands)
+    delivery_network, delivery_network_share, _ = _classify_antoshka_network(out_ws)
+    novelty_candidates = find_novelty_candidates(delivery_wb, existing_articles, network=delivery_network)
 
     name_col = DESC_COLS.index("Наименование товара") + 1
     art_col = DESC_COLS.index("Артикул") + 1
+    brand_col = DESC_COLS.index("Торговая Марка") + 1
     vdorozi_col = len(DESC_COLS) + 1
     status_col = len(DESC_COLS) + 2
     r = 4 + n_rows
-    for name, art, qty in novelty_candidates:
+    for name, art, qty, brand, brand_uncertain in novelty_candidates:
         out_ws.cell(row=r, column=name_col, value=name)
         out_ws.cell(row=r, column=art_col, value=art)
+        brand_cell = out_ws.cell(row=r, column=brand_col, value=brand)
+        if brand_uncertain:
+            brand_cell.fill = BRAND_UNCERTAIN_FILL
         out_ws.cell(row=r, column=vdorozi_col, value=qty)
         out_ws.cell(row=r, column=status_col, value="NEW")
         for i in range(len(all_stores)):
@@ -1067,6 +1176,8 @@ def build_report(src_file, delivery_file, price_file=None, abc_files=None, netwo
         "n_rows": n_rows,
         "n_novelty": len(novelty_candidates),
         "n_network_stores": len(network_stores),
+        "delivery_network": delivery_network,
+        "delivery_network_share": delivery_network_share,
     }
     return out_wb, stats
 
@@ -1177,41 +1288,6 @@ def parse_epicentr_sales(wb):
     return names, data, stores, zalyshok_date
 
 
-def build_epicentr_report(
-    season_file, offseason_file,
-    reference_file=None, price_file=None, delivery_file=None, abc_files=None,
-):
-    """
-    season_file / offseason_file - те саме, що src_file у build_report:
-    шлях, файлоподібний об'єкт або bytes; формат (.xls/.xlsx) визначається
-    автоматично. reference_file (необов'язковий) - файл-довідник попереднього
-    періоду для заповнення "АМ". price_file (необов'язковий) - прайс-лист
-    для "Артикул"/"Бренд"/"Статус артикула"/"Склад". delivery_file
-    (необов'язковий) - графік поставок для "В дорозі" (потребує, щоб
-    price_file вже дав "Артикул" - без нього "В дорозі" лишиться порожнім).
-    abc_files (необов'язковий список) - файли АВС-аналізу продажів для
-    "Категорія" (джойн за "Артикул", підтягнутим з прайс-листа, або, якщо
-    не співпав, за точною "Назва").
-    Повертає (openpyxl.Workbook, dict зі статистикою).
-    """
-    out_wb = openpyxl.Workbook()
-    out_ws = out_wb.active
-    out_ws.title = "Епіцентр"
-
-    ref_wb = open_delivery_workbook(reference_file) if reference_file else None
-    price_wb = open_delivery_workbook(price_file) if price_file else None
-    delivery_wb = open_delivery_workbook(delivery_file) if delivery_file else None
-    abc_by_article, abc_by_name, qty_by_article, qty_by_name = (
-        parse_abc_files(abc_files) if abc_files else ({}, {}, {}, {})
-    )
-    b_cutoff = class_quantity_cutoff(abc_by_article, qty_by_article, "B", 0.5)
-    stats = _write_epicentr_sheet(
-        out_ws, season_file, offseason_file, ref_wb, price_wb, delivery_wb, abc_by_article, abc_by_name,
-        qty_by_article=qty_by_article, qty_by_name=qty_by_name, b_cutoff=b_cutoff,
-    )
-    return out_wb, stats
-
-
 def build_epicentr_combined_report(
     mt_season, mt_offseason, bsh_season, bsh_offseason,
     reference_file=None, price_file=None, delivery_file=None, abc_files=None,
@@ -1267,6 +1343,7 @@ def build_epicentr_combined_report(
         all_stats[label] = _write_epicentr_sheet(
             out_ws, season_f, offseason_f, ref_wb, price_wb, delivery_wb, abc_by_article, abc_by_name,
             network_abc, qty_by_article=qty_by_article, qty_by_name=qty_by_name, b_cutoff=b_cutoff,
+            network_label=label,
         )
 
     if network_stores:
@@ -1680,11 +1757,11 @@ def _write_counts_row(total_ws, r, cols, c, price_sku_total, price_sku_network):
 
         pct1 = total_ws.cell(row=r, column=cols["% представленості прайс"])
         pct1.value = (total / price_sku_total) if price_sku_total else None
-        pct1.number_format = "0.0%"
+        pct1.number_format = "0%"
 
         pct2 = total_ws.cell(row=r, column=cols["% представленості до акт ас з ПРАЙСУ"])
         pct2.value = (total / price_sku_network) if price_sku_network else None
-        pct2.number_format = "0.0%"
+        pct2.number_format = "0%"
 
     return total
 
@@ -1754,6 +1831,67 @@ def _augment_total_sheet(total_ws, counts_by_store, price_totals=None):
     return result
 
 
+def _split_price_totals_by_network(by_brand):
+    """
+    Розбиває {бренд: {"total":, "with_artikul_v_seti":}} (результат
+    count_toy_skus) на дві суми за домовленістю: бренд Chicco - це МТ,
+    усі інші бренди прайс-листа (Clementoni, Baby Einstein, Bright Starts,
+    Ingenuity тощо) - це БШ. Повертає {"МТ": {...}, "БШ": {...}}, кожен -
+    {"total": ..., "with_artikul_v_seti": ...}.
+    """
+    result = {
+        "МТ": {"total": 0, "with_artikul_v_seti": 0},
+        "БШ": {"total": 0, "with_artikul_v_seti": 0},
+    }
+    for brand, v in by_brand.items():
+        network = "МТ" if normalize_brand(brand) == "CHICCO" else "БШ"
+        result[network]["total"] += v["total"]
+        result[network]["with_artikul_v_seti"] += v["with_artikul_v_seti"]
+    return result
+
+
+def _classify_antoshka_network(ws):
+    """
+    Визначає, до якої мережі (МТ чи БШ) відноситься контрагент на листі
+    "Звід" - за часткою бренду Chicco серед заповнених значень "Торговая
+    Марка" (на рівні товару, тому кожен товар рахується один раз): більше
+    50% Chicco - МТ, інакше - БШ. Повертає (мережа, частка_chicco,
+    кількість_товарів_з_брендом) - останні два лише для прозорості
+    (показати користувачу, на чому ґрунтується визначення).
+    """
+    header_row = None
+    for r in range(1, min(ws.max_row, 10) + 1):
+        for c in range(1, ws.max_column + 1):
+            if ws.cell(row=r, column=c).value == "Торговая Марка":
+                header_row = r
+                break
+        if header_row is not None:
+            break
+    if header_row is None:
+        return "БШ", None, 0
+
+    brand_col = None
+    for c in range(1, ws.max_column + 1):
+        if ws.cell(row=header_row, column=c).value == "Торговая Марка":
+            brand_col = c
+            break
+
+    total = 0
+    chicco = 0
+    for r in range(header_row + 1, ws.max_row + 1):
+        brand = ws.cell(row=r, column=brand_col).value
+        if brand in ("", None):
+            continue
+        total += 1
+        if normalize_brand(brand) == "CHICCO":
+            chicco += 1
+
+    if total == 0:
+        return "БШ", None, 0
+    share = chicco / total
+    return ("МТ" if share > 0.5 else "БШ"), share, total
+
+
 def fill_total_summary(file, price_file=None):
     """
     Приймає вже готовий звід (той, що згенерував build_report /
@@ -1767,28 +1905,59 @@ def fill_total_summary(file, price_file=None):
     порожньо, якщо жодної пари не знайдено.
     price_file (необов'язковий) - прайс-лист будь-якої мережі (той самий
     формат, що бере count_toy_skus). Якщо переданий - додатково дописує
-    "Всього скю прайс" / "Всього скю прайс мережі" (те саме число СКЮ
+    "Всього скю прайс" / "Всього скю прайс мережі" (кількість СКЮ
     прайс-листа - усього і з "Артикул в сети" - в кожному рядку кожного
     листа Total) і два відсотки представленості від "Всього СКЮ" цього
-    магазину.
-    Повертає (openpyxl.Workbook, {назва_листа_Total: {статистика}}).
+    магазину. Число СКЮ прайс-листа рахується ОКРЕМО для МТ (бренд Chicco)
+    і для БШ (усі інші бренди прайс-листа) - розділ _split_price_totals_by_network().
+    Для листів "Total_МТ"/"Total_БШ" (Епіцентр) відповідність пряма; для
+    листа "Total" (Антошка) мережа визначається за _classify_antoshka_network()
+    (частка Chicco серед "Торговая Марка" на листі "Звід").
+    Повертає (openpyxl.Workbook, {назва_листа_Total: {статистика}}) - у
+    статистиці кожного листа, якщо переданий прайс-лист, також є
+    "price_group" ("МТ"/"БШ" - до якої групи прайс-листа віднесено цей
+    лист) і, для Антошки, "price_group_share" (частка Chicco серед
+    "Торговая Марка", що визначила групу) чи None, якщо визначити не
+    вдалось.
+    Приймає як .xlsx, так і .xls (формат визначається за вмістом файлу) -
+    хоча на практиці цей файл завжди .xlsx, бо це вихідний формат
+    build_report/build_epicentr_combined_report.
     """
-    wb = load_xlsx(read_bytes(file))
+    data = read_bytes(file)
+    if detect_excel_format(data) == "xlsx":
+        wb = load_xlsx(data)
+    else:
+        # .xls читати можна лише на читання (xlrd), а цю книгу далі
+        # потрібно ДОПИСУВАТИ - тому конвертуємо значення клітинок у
+        # новий, повноцінно редагований openpyxl.Workbook.
+        wb = _xls_values_to_openpyxl(xlrd.open_workbook(file_contents=data))
 
-    price_totals = None
+    price_totals_by_network = None
     if price_file is not None:
         by_brand = count_toy_skus(price_file)
-        price_totals = {
-            "total": sum(v["total"] for v in by_brand.values()),
-            "with_artikul_v_seti": sum(v["with_artikul_v_seti"] for v in by_brand.values()),
-        }
+        price_totals_by_network = _split_price_totals_by_network(by_brand)
 
     stats = {}
     for matrix_name, total_name in TOTAL_SHEET_PAIRS:
         if matrix_name not in wb.sheetnames or total_name not in wb.sheetnames:
             continue
-        counts_by_store = _count_nova_am_by_class(wb[matrix_name])
-        stats[total_name] = _augment_total_sheet(wb[total_name], counts_by_store, price_totals)
+        matrix_ws = wb[matrix_name]
+        counts_by_store = _count_nova_am_by_class(matrix_ws)
+
+        sheet_price_totals = None
+        network, network_share = None, None
+        if price_totals_by_network is not None:
+            if matrix_name in ("МТ", "БШ"):
+                network = matrix_name
+            else:  # "Звід" - Антошка, мережу визначаємо за "Торговая Марка"
+                network, network_share, _ = _classify_antoshka_network(matrix_ws)
+            sheet_price_totals = price_totals_by_network[network]
+
+        stats[total_name] = _augment_total_sheet(wb[total_name], counts_by_store, sheet_price_totals)
+        if network is not None:
+            stats[total_name]["price_group"] = network
+            if matrix_name == "Звід":
+                stats[total_name]["price_group_share"] = network_share
 
     return wb, stats
 
@@ -1796,13 +1965,16 @@ def fill_total_summary(file, price_file=None):
 def _write_epicentr_sheet(
     out_ws, season_file, offseason_file,
     ref_wb=None, price_wb=None, delivery_wb=None, abc_by_article=None, abc_by_name=None,
-    network_abc=None, qty_by_article=None, qty_by_name=None, b_cutoff=None,
+    network_abc=None, qty_by_article=None, qty_by_name=None, b_cutoff=None, *, network_label,
 ):
-    """Пише один лист зводу Епіцентру в out_ws (уже створений). network_abc
-    (необов'язковий) - {код_магазину: АВС-клас} з "Мережі продажі", для
-    нового рядка над кодами магазинів і для автозаповнення "НОВА АМ".
-    qty_by_article/qty_by_name/b_cutoff - те саме, що дає parse_abc_files і
-    class_quantity_cutoff, теж для "НОВА АМ". Повертає stats."""
+    """Пише один лист зводу Епіцентру в out_ws (уже створений). network_label
+    - "МТ" або "БШ" - яку з двох груп графіка поставок показувати в
+    кандидатах у новинки (find_novelty_candidates): Chicco - це МТ, решта
+    брендів - БШ. network_abc (необов'язковий) - {код_магазину: АВС-клас} з
+    "Мережі продажі", для нового рядка над кодами магазинів і для
+    автозаповнення "НОВА АМ". qty_by_article/qty_by_name/b_cutoff - те
+    саме, що дає parse_abc_files і class_quantity_cutoff, теж для
+    "НОВА АМ". Повертає stats."""
     network_abc = network_abc or {}
     qty_by_article = qty_by_article or {}
     qty_by_name = qty_by_name or {}
@@ -1864,15 +2036,12 @@ def _write_epicentr_sheet(
     price_matches = 0
     delivery_matches = 0
     existing_articles = set()
-    contragent_brands = set()
     for r, art in enumerate(all_articles, start=4):
         p_art, p_brand, p_status, p_sklad = price_map.get(art, (None, None, None, None))
         vdorozi = delivery_data.get(p_art) if p_art else None
         if p_art is not None:
             price_matches += 1
             existing_articles.add(p_art)
-        if p_brand is not None:
-            contragent_brands.add(normalize_brand(p_brand))
         if vdorozi is not None:
             delivery_matches += 1
 
@@ -1922,23 +2091,25 @@ def _write_epicentr_sheet(
                     nova_am_cell.fill = NOVA_AM_YELLOW_FILL
         n_rows += 1
 
-    # Кандидати в новинки - так само, як у Антошки: пошук ведеться на
-    # графіку поставок (тільки лист Chicco, novelty_reliable=True), з
-    # фільтром за брендами і артикулами, які вже підтягнуті прайс-листом
-    # для цього конкретного зводу (МТ/БШ). Без графіка поставок або без
-    # прайс-листа (тоді contragent_brands порожній) новинок не буде.
+    # Кандидати в новинки - пошук ведеться на всіх листах графіка поставок
+    # зі статусом "new", фільтр категоріальний за network_label (Chicco =
+    # МТ, решта брендів = БШ). Без графіка поставок новинок не буде.
     novelty_candidates = []
     if delivery_wb is not None:
-        novelty_candidates = find_novelty_candidates(delivery_wb, existing_articles, contragent_brands)
+        novelty_candidates = find_novelty_candidates(delivery_wb, existing_articles, network=network_label)
 
     name_col = EPICENTR_DESC_COLS.index("Назва") + 1
     art_col = EPICENTR_DESC_COLS.index("Артикул") + 1
+    brand_col = EPICENTR_DESC_COLS.index("Бренд") + 1
     vdorozi_col = EPICENTR_DESC_COLS.index("В дорозі") + 1
     status_col = EPICENTR_DESC_COLS.index("Статус артикула") + 1
     r = 4 + n_rows
-    for name, art, qty in novelty_candidates:
+    for name, art, qty, brand, brand_uncertain in novelty_candidates:
         out_ws.cell(row=r, column=name_col, value=name)
         out_ws.cell(row=r, column=art_col, value=art)
+        brand_cell = out_ws.cell(row=r, column=brand_col, value=brand)
+        if brand_uncertain:
+            brand_cell.fill = BRAND_UNCERTAIN_FILL
         out_ws.cell(row=r, column=vdorozi_col, value=qty)
         out_ws.cell(row=r, column=status_col, value="NEW")
         for i in range(len(all_stores)):
